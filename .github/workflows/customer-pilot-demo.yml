@@ -17,16 +17,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout OperaLa
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: greentic-operala
       - name: Checkout SoRLa
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: greenticai/greentic-sorla
           path: greentic-sorla
       - name: Checkout Greentic Pack
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: greenticai/greentic-pack
           path: greentic-pack
