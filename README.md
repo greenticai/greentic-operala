@@ -1,8 +1,30 @@
 # greentic-operala
 
-`greentic-operala` is the planned authoring workspace for OperaLa:
-operational business logic that consumes SoRLa system-of-record contracts and
-emits deterministic operational handoff artifacts.
+OperaLa turns business operations intent into deterministic handoff artifacts.
+
+In simple terms: SoRLa describes the system of record, such as records, events,
+actions, and agent endpoints. OperaLa sits next to that and describes the
+operational business logic that should run against those SoRLa contracts. It
+does not mutate SoRLa directly. It reads a SoRLa source, asks or infers the
+operational answers, checks whether the SoRLa contract has the pieces needed,
+and writes handoff files that a runner such as `greentic-operax` can execute.
+
+The first built-in capability is tenancy rent reconciliation from bank
+transactions.
+
+## What It Can Do
+
+- Read a SoRLa YAML source.
+- Create an `answers.json` draft from a business prompt.
+- Emit a localized QA schema for authoring tools.
+- Validate answers and analyse readiness against the SoRLa contract.
+- Propose additive SoRLa patch material when required records, events, actions,
+  or endpoints are missing.
+- Generate deterministic OperaLa handoff artifacts.
+- Build a `.gtpack` using `greentic-pack`.
+- Hand the generated pack to the installed `greentic-operax` runner.
+
+## Install
 
 Future release builds are intended to be installable with `cargo-binstall`:
 
@@ -11,11 +33,108 @@ cargo binstall greentic-operala
 cargo binstall greentic-operax
 ```
 
-Follow `.codex/global_rules.md` and run:
+For local development, run the OperaLa binary from this checkout:
+
+```bash
+cargo run --bin greentic-operala -- --help
+```
+
+## Quick Example
+
+Generate answers from the tenancy reconciliation prompt:
+
+```bash
+cargo run --bin greentic-operala -- prompt \
+  --locale en-GB \
+  --tenant demo-tenant \
+  --team property-ops \
+  --sorla examples/tenancy/sorla.yaml \
+  --output target/operala-demo/answers.json \
+  "$(cat examples/tenancy/prompt.txt)"
+```
+
+Turn those answers into handoff artifacts and a `.gtpack`:
+
+```bash
+cargo run --bin greentic-operala -- wizard \
+  --answers target/operala-demo/answers.json \
+  --locale en-GB
+```
+
+The main outputs are:
+
+- `target/operala/tenancy_rent_reconciliation/operala-handoff.json`
+- `target/operala/tenancy_rent_reconciliation/operala.build.lock`
+- `target/gtpacks/tenancy-rent-reconciliation.gtpack`
+
+## Run With OperaX
+
+After `greentic-operax` is installed on `PATH`, dry-run the generated pack:
+
+```bash
+greentic-operax run \
+  target/gtpacks/tenancy-rent-reconciliation.gtpack \
+  --tenant demo-tenant \
+  --team property-ops \
+  --sorx-url http://localhost:8088 \
+  --input examples/tenancy/banking/one-transaction.json \
+  --dry-run \
+  --json
+```
+
+There is also a small mock SORX server for an end-to-end local demo:
+
+```bash
+tmp_dir="$(mktemp -d -t operala-demo.XXXXXX)"
+cp examples/tenancy/sorx-fixtures/initial-state.json "$tmp_dir/sorx-state.json"
+echo "[]" > "$tmp_dir/sorx-calls.json"
+
+python3 examples/tenancy/mock-sorx/server.py \
+  --port 18088 \
+  --state "$tmp_dir/sorx-state.json" \
+  --calls "$tmp_dir/sorx-calls.json" &
+mock_pid="$!"
+
+greentic-operax run \
+  target/gtpacks/tenancy-rent-reconciliation.gtpack \
+  --tenant demo-tenant \
+  --team property-ops \
+  --sorx-url http://127.0.0.1:18088 \
+  --input examples/tenancy/banking/daily-transactions.json \
+  --json
+
+kill "$mock_pid"
+```
+
+## Useful Commands
+
+Show localized help:
+
+```bash
+cargo run --bin greentic-operala -- --help --locale de
+cargo run --bin greentic-operala -- wizard --schema --locale nl
+```
+
+Run the core checks:
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```
+
+Run the full local check:
 
 ```bash
 bash ci/local_check.sh
 ```
 
-before publishing implementation work.
-# greentic-operala
+The full local check expects `greentic-operax` to be installed on `PATH`.
+
+## Relationship To Other Greentic Tools
+
+- SoRLa owns system-of-record contracts.
+- OperaLa owns operational handoff authoring.
+- OperaX runs OperaLa handoff packs against SORX.
+- `greentic-pack` builds the `.gtpack` package format.
+
