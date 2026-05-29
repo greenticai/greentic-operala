@@ -1,0 +1,26 @@
+name: Nightly Coverage
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+      - name: Install coverage tooling
+        run: |
+          cargo binstall -y --force cargo-llvm-cov
+          cargo binstall -y --force cargo-nextest
+          cargo binstall -y --force greentic-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Run coverage and enforce policy
+        run: greentic-dev coverage

@@ -1,0 +1,6 @@
+{
+  "minimum_coverage": 80,
+  "minimum_lines_covered": 80,
+  "minimum_functions_covered": 75,
+  "fail_on_violation": true
+}

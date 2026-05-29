@@ -1,0 +1,301 @@
+package:
+  name: tenancy-system
+  version: 0.1.0
+  i18n_key: examples.operala_tenancy.package
+
+roles:
+  - id: finance
+    i18n_key: examples.operala_tenancy.roles.finance
+    label: Finance
+    grants:
+      - records.tenant.read
+      - records.tenancy.read
+      - records.rent_obligation.read
+      - records.rent_obligation.update
+      - records.payment.create
+      - records.payment.read
+      - records.reconciliation_case.create
+      - records.reconciliation_case.read
+      - agent_endpoints.finance.*
+
+records:
+  - name: Tenant
+    i18n_key: examples.operala_tenancy.records.tenant
+    source: native
+    fields:
+      - name: tenant_id
+        type: uuid
+        rules:
+          unique: true
+      - name: name
+        type: string
+
+  - name: Tenancy
+    i18n_key: examples.operala_tenancy.records.tenancy
+    source: native
+    fields:
+      - name: tenancy_id
+        type: uuid
+        rules:
+          unique: true
+      - name: tenant_id
+        type: uuid
+        references:
+          record: Tenant
+          field: tenant_id
+      - name: tenancy_reference
+        type: string
+        rules:
+          unique: true
+      - name: property
+        type: string
+
+  - name: RentObligation
+    i18n_key: examples.operala_tenancy.records.rent_obligation
+    source: native
+    access:
+      read:
+        roles: [finance]
+      update:
+        roles: [finance]
+    fields:
+      - name: obligation_id
+        type: uuid
+        rules:
+          unique: true
+      - name: tenancy_id
+        type: uuid
+        references:
+          record: Tenancy
+          field: tenancy_id
+      - name: tenancy_reference
+        type: string
+      - name: expected_amount
+        type: decimal
+        rules:
+          min: 0
+          precision: 12
+          scale: 2
+      - name: due_date
+        type: date
+      - name: status
+        type: string
+        enum_values: [expected, paid, partially_paid, overdue, disputed]
+
+  - name: Payment
+    i18n_key: examples.operala_tenancy.records.payment
+    source: native
+    access:
+      read:
+        roles: [finance]
+      create:
+        roles: [finance]
+    fields:
+      - name: payment_id
+        type: uuid
+        rules:
+          unique: true
+      - name: obligation_id
+        type: uuid
+        references:
+          record: RentObligation
+          field: obligation_id
+      - name: amount
+        type: decimal
+        rules:
+          min: 0
+          precision: 12
+          scale: 2
+      - name: received_at
+        type: datetime
+      - name: source_event_id
+        type: string
+
+  - name: ReconciliationCase
+    i18n_key: examples.operala_tenancy.records.reconciliation_case
+    source: native
+    access:
+      read:
+        roles: [finance]
+      create:
+        roles: [finance]
+    fields:
+      - name: case_id
+        type: uuid
+        rules:
+          unique: true
+      - name: source_event_id
+        type: string
+      - name: expected_record_id
+        type: uuid
+      - name: reason
+        type: string
+      - name: status
+        type: string
+        enum_values: [open, resolved, rejected]
+
+events:
+  - name: BankTransaction
+    record: Payment
+    kind: integration
+    emits:
+      - name: transaction_id
+        type: string
+      - name: booked_at
+        type: date
+      - name: amount
+        type: decimal
+      - name: currency
+        type: string
+      - name: reference
+        type: string
+
+actions:
+  - name: create_payment
+  - name: mark_obligation_paid
+  - name: mark_obligation_partially_paid
+  - name: create_reconciliation_case
+
+agent_endpoints:
+  - id: create_payment
+    title: Create payment
+    intent: Record a received payment against a rent obligation.
+    risk: medium
+    approval: policy-driven
+    authorization:
+      roles:
+        any_of: [finance]
+    inputs:
+      - name: obligation_id
+        type: uuid
+        required: true
+      - name: amount
+        type: decimal
+        required: true
+      - name: received_at
+        type: datetime
+        required: true
+      - name: source_event_id
+        type: string
+        required: true
+    outputs:
+      - name: payment_id
+        type: uuid
+    side_effects:
+      - records.payment.create
+    backing:
+      actions: [create_payment]
+      events: []
+    execution:
+      kind: record-create
+      record: Payment
+      return:
+        payment_id: "$generated.payment_id"
+    examples:
+      - name: exact_rent_payment
+        summary: Exact rent payment creates a payment.
+        input:
+          obligation_id: "11111111-1111-4111-8111-111111111111"
+          amount: 1200.00
+          received_at: "2026-05-01T09:15:00Z"
+          source_event_id: bank_tx_001
+
+  - id: mark_obligation_paid
+    title: Mark rent obligation paid
+    intent: Mark a rent obligation as fully paid after reconciliation.
+    risk: medium
+    approval: policy-driven
+    authorization:
+      roles:
+        any_of: [finance]
+    inputs:
+      - name: obligation_id
+        type: uuid
+        required: true
+    outputs:
+      - name: obligation_id
+        type: uuid
+    side_effects:
+      - records.rent_obligation.update
+    backing:
+      actions: [mark_obligation_paid]
+      events: []
+    execution:
+      kind: record-update
+      record: RentObligation
+      return:
+        obligation_id: "$input.obligation_id"
+    examples:
+      - name: mark_exact_match_paid
+        summary: Exact match marks the obligation paid.
+        input:
+          obligation_id: "11111111-1111-4111-8111-111111111111"
+
+  - id: mark_obligation_partially_paid
+    title: Mark rent obligation partially paid
+    intent: Mark a rent obligation as partially paid after reconciliation.
+    risk: medium
+    approval: policy-driven
+    authorization:
+      roles:
+        any_of: [finance]
+    inputs:
+      - name: obligation_id
+        type: uuid
+        required: true
+    outputs:
+      - name: obligation_id
+        type: uuid
+    side_effects:
+      - records.rent_obligation.update
+    backing:
+      actions: [mark_obligation_partially_paid]
+      events: []
+    execution:
+      kind: record-update
+      record: RentObligation
+      return:
+        obligation_id: "$input.obligation_id"
+    examples:
+      - name: mark_partial_match
+        summary: Partial match marks the obligation partially paid.
+        input:
+          obligation_id: "22222222-2222-4222-8222-222222222222"
+
+  - id: create_reconciliation_case
+    title: Create reconciliation case
+    intent: Open a manual reconciliation case for an unmatched or ambiguous payment.
+    risk: medium
+    approval: policy-driven
+    authorization:
+      roles:
+        any_of: [finance]
+    inputs:
+      - name: source_event_id
+        type: string
+        required: true
+      - name: reason
+        type: string
+        required: true
+      - name: expected_record_id
+        type: uuid
+        required: false
+    outputs:
+      - name: case_id
+        type: uuid
+    side_effects:
+      - records.reconciliation_case.create
+    backing:
+      actions: [create_reconciliation_case]
+      events: []
+    execution:
+      kind: record-create
+      record: ReconciliationCase
+      return:
+        case_id: "$generated.case_id"
+    examples:
+      - name: unmatched_payment
+        summary: Unmatched payment opens a reconciliation case.
+        input:
+          source_event_id: bank_tx_003
+          reason: unallocated_cash

@@ -1,0 +1,56 @@
+name: Customer Pilot Demo
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: customer-pilot-demo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout OperaLa
+        uses: actions/checkout@v4
+        with:
+          path: greentic-operala
+      - name: Checkout SoRLa
+        uses: actions/checkout@v4
+        with:
+          repository: greenticai/greentic-sorla
+          path: greentic-sorla
+      - name: Checkout Greentic Pack
+        uses: actions/checkout@v4
+        with:
+          repository: greenticai/greentic-pack
+          path: greentic-pack
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            greentic-operala
+            greentic-sorla
+            greentic-pack
+      - name: Install ripgrep and jq
+        run: sudo apt-get update && sudo apt-get install -y ripgrep jq
+      - name: Install Greentic binary tools
+        run: |
+          cargo install cargo-binstall --locked
+          cargo binstall -y greentic-operax
+      - name: Run customer pilot fixture smoke
+        working-directory: greentic-operala
+        run: bash scripts/e2e/customer-pilot-demo-smoke.sh
+      - name: Upload demo artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: customer-pilot-demo-artifacts
+          path: |
+            greentic-operala/target/operala
+            greentic-operala/target/gtpacks

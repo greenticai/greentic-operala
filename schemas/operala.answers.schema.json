@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://greentic.ai/schemas/operala.answers.v1.json",
+  "title": "OperaLa Answers v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "intent",
+    "sorla",
+    "extension",
+    "tenant",
+    "outputs"
+  ],
+  "properties": {
+    "schema": {
+      "const": "greentic.operala.answers.v1"
+    },
+    "intent": {
+      "type": "string",
+      "minLength": 1
+    },
+    "detected_capability": {
+      "type": "string",
+      "enum": ["reconciliation"]
+    },
+    "extension": {
+      "type": "string",
+      "pattern": "^greentic\\.operala\\.[a-z0-9-]+\\.v[0-9]+$"
+    },
+    "locale": {
+      "type": "string"
+    },
+    "tenant": {
+      "type": "string"
+    },
+    "team": {
+      "type": "string"
+    },
+    "sorla": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/sourceRef"
+        },
+        "expected_schema": {
+          "type": "string",
+          "const": "greentic.sorla.v0.2"
+        }
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["work_dir"],
+      "properties": {
+        "handoff_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gtpack_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "work_dir": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "anyOf": [
+        {"required": ["handoff_path"]},
+        {"required": ["gtpack_path"]}
+      ]
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_sorla_patch_proposal": {
+          "type": "boolean",
+          "default": false
+        },
+        "apply_sorla_patch": {
+          "type": "boolean",
+          "const": false,
+          "description": "OperaLa may propose SoRLa patches, but must not apply them directly."
+        }
+      }
+    },
+    "capability_answers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reconciliation": {
+          "$ref": "#/$defs/reconciliationAnswers"
+        }
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "uri"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["file", "oci", "store", "repo"]
+        },
+        "uri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
+    "fieldMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "reconciliationAnswers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "source_event",
+        "expected_record",
+        "settlement_record",
+        "exception_record",
+        "input_modes",
+        "source_fields",
+        "expected_fields",
+        "matching",
+        "exception_policy",
+        "actions"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_\\-]*$"
+        },
+        "source_event": {"type": "string", "minLength": 1},
+        "expected_record": {"type": "string", "minLength": 1},
+        "settlement_record": {"type": "string", "minLength": 1},
+        "exception_record": {"type": "string", "minLength": 1},
+        "input_modes": {
+          "type": "array",
+          "items": {"enum": ["single", "batch"]},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "source_fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["external_id", "amount", "date", "reference", "currency"],
+          "properties": {
+            "external_id": {"type": "string", "minLength": 1},
+            "amount": {"type": "string", "minLength": 1},
+            "date": {"type": "string", "minLength": 1},
+            "reference": {"type": "string", "minLength": 1},
+            "currency": {"type": "string", "minLength": 1}
+          }
+        },
+        "expected_fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "amount", "due_date", "reference", "status"],
+          "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "amount": {"type": "string", "minLength": 1},
+            "due_date": {"type": "string", "minLength": 1},
+            "reference": {"type": "string", "minLength": 1},
+            "status": {"type": "string", "minLength": 1}
+          }
+        },
+        "matching": {
+          "type": "object",
+          "description": "Thresholds are percentages from 0 to 100. OperaLa validation additionally requires auto_match_threshold >= review_threshold.",
+          "additionalProperties": false,
+          "required": ["amount_tolerance", "date_window_days", "auto_match_threshold", "review_threshold"],
+          "properties": {
+            "amount_tolerance": {"type": "number", "minimum": 0},
+            "date_window_days": {"type": "integer", "minimum": 0},
+            "auto_match_threshold": {"$ref": "#/$defs/threshold"},
+            "review_threshold": {"$ref": "#/$defs/threshold"}
+          }
+        },
+        "exception_policy": {
+          "$ref": "#/$defs/fieldMap"
+        },
+        "actions": {
+          "$ref": "#/$defs/fieldMap"
+        },
+        "agent_endpoints": {
+          "$ref": "#/$defs/fieldMap"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  local-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout OperaLa
+        uses: actions/checkout@v4
+        with:
+          path: greentic-operala
+      - name: Checkout SoRLa
+        uses: actions/checkout@v4
+        with:
+          repository: greenticai/greentic-sorla
+          path: greentic-sorla
+      - name: Checkout Greentic Pack
+        uses: actions/checkout@v4
+        with:
+          repository: greenticai/greentic-pack
+          path: greentic-pack
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            greentic-operala
+            greentic-sorla
+            greentic-pack
+      - name: Install ripgrep and jq
+        run: sudo apt-get update && sudo apt-get install -y ripgrep jq
+      - name: Install Greentic binary tools
+        run: |
+          cargo install cargo-binstall --locked
+          cargo binstall -y greentic-operax
+      - name: Run local check
+        working-directory: greentic-operala
+        run: bash ci/local_check.sh

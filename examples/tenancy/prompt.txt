@@ -1,0 +1,5 @@
+Set up rent payment reconciliation from bank transactions.
+Exact payments should create a Payment and mark the rent obligation paid.
+Partial payments should create a Payment and a ReconciliationCase.
+Unknown payments should create an unallocated cash ReconciliationCase.
+Support a single transaction JSON and a daily batch JSON.

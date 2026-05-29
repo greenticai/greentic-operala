@@ -1,0 +1,76 @@
+{
+  "schema": "greentic.operala.answers.v1",
+  "intent": "Set up rent payment reconciliation from bank transactions",
+  "detected_capability": "reconciliation",
+  "extension": "greentic.operala.reconciliation.v1",
+  "locale": "en-GB",
+  "tenant": "demo-tenant",
+  "team": "property-ops",
+  "sorla": {
+    "source": {
+      "kind": "file",
+      "uri": "./examples/tenancy/sorla.yaml"
+    },
+    "expected_schema": "greentic.sorla.v0.2"
+  },
+  "outputs": {
+    "handoff_path": "./target/operala/tenancy-rent-reconciliation/operala-handoff.json",
+    "gtpack_path": "./target/gtpacks/tenancy-rent-reconciliation.gtpack",
+    "work_dir": "./target/operala/tenancy-rent-reconciliation"
+  },
+  "approval": {
+    "allow_sorla_patch_proposal": true,
+    "apply_sorla_patch": false
+  },
+  "capability_answers": {
+    "reconciliation": {
+      "name": "tenancy_rent_reconciliation",
+      "source_event": "BankTransaction",
+      "expected_record": "RentObligation",
+      "settlement_record": "Payment",
+      "exception_record": "ReconciliationCase",
+      "input_modes": [
+        "single",
+        "batch"
+      ],
+      "source_fields": {
+        "external_id": "transaction_id",
+        "amount": "amount",
+        "date": "booked_at",
+        "reference": "reference",
+        "currency": "currency"
+      },
+      "expected_fields": {
+        "id": "obligation_id",
+        "amount": "expected_amount",
+        "due_date": "due_date",
+        "reference": "tenancy_reference",
+        "status": "status"
+      },
+      "matching": {
+        "amount_tolerance": 2.0,
+        "date_window_days": 7,
+        "auto_match_threshold": 85,
+        "review_threshold": 50
+      },
+      "exception_policy": {
+        "partial_payment": "create_case",
+        "ambiguous_match": "manual_allocation",
+        "unmatched": "unallocated_cash_case",
+        "duplicate_possible": "manual_review"
+      },
+      "actions": {
+        "create_settlement": "create_payment",
+        "mark_paid": "mark_obligation_paid",
+        "mark_partially_paid": "mark_obligation_partially_paid",
+        "create_exception": "create_reconciliation_case"
+      },
+      "agent_endpoints": {
+        "create_settlement": "create_payment",
+        "mark_paid": "mark_obligation_paid",
+        "mark_partially_paid": "mark_obligation_partially_paid",
+        "create_exception": "create_reconciliation_case"
+      }
+    }
+  }
+}

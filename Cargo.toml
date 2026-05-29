@@ -1,0 +1,41 @@
+[package]
+name = "greentic-operala"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/greenticai/greentic-operala"
+homepage = "https://github.com/greenticai/greentic-operala"
+documentation = "https://docs.rs/greentic-operala"
+readme = "README.md"
+description = "OperaLa authoring tools for Greentic operational business logic handoff artifacts."
+keywords = ["greentic", "operala", "operations", "wizard"]
+categories = ["development-tools", "command-line-utilities"]
+include = ["build.rs", "src/**", "i18n/**", "schemas/**", "examples/**", "Cargo.toml", "README.md", "LICENSE"]
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.{ archive-format }"
+bin-dir = "{ name }-v{ version }-{ target }"
+pkg-fmt = "tgz"
+bin = ["greentic-operala"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+blake3 = "1"
+greentic-pack = { package = "greentic-pack-lib", path = "../greentic-pack/crates/greentic-pack", version = "0.5" }
+greentic-qa-lib = "0.5"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.11"
+
+[dev-dependencies]
+zip = "8"
+
+[lib]
+name = "greentic_operala"
+path = "src/lib.rs"
+
+[[bin]]
+name = "greentic-operala"
+path = "src/main.rs"

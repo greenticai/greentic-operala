@@ -1,0 +1,10 @@
+{
+  "expected_actions": [
+    "record_rent_payment"
+  ],
+  "expected_state": {
+    "payments": 1,
+    "reconciliation_cases": 0,
+    "rent_001_status": "paid"
+  }
+}
