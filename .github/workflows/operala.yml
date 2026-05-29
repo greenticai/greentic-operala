@@ -15,14 +15,27 @@ jobs:
   authoring:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout OperaLa
+        uses: actions/checkout@v4
+        with:
+          path: greentic-operala
+      - name: Checkout Greentic Pack
+        uses: actions/checkout@v4
+        with:
+          repository: greenticai/greentic-pack
+          path: greentic-pack
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            greentic-operala
+            greentic-pack
       - name: Install ripgrep and jq
         run: sudo apt-get update && sudo apt-get install -y ripgrep jq
       - name: Check OperaLa authoring surface
+        working-directory: greentic-operala
         run: |
           cargo fmt --all -- --check
           cargo clippy --all-targets --all-features -- -D warnings

@@ -39,10 +39,12 @@ jobs:
             greentic-pack
       - name: Install ripgrep and jq
         run: sudo apt-get update && sudo apt-get install -y ripgrep jq
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
       - name: Install Greentic binary tools
-        run: |
-          cargo install cargo-binstall --locked
-          cargo binstall -y greentic-operax
+        run: cargo binstall -y greentic-operax
       - name: Run customer pilot fixture smoke
         working-directory: greentic-operala
         run: bash scripts/e2e/customer-pilot-demo-smoke.sh
