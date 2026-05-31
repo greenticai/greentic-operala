@@ -10,7 +10,7 @@ readme = "README.md"
 description = "OperaLa authoring tools for Greentic operational business logic handoff artifacts."
 keywords = ["greentic", "operala", "operations", "wizard"]
 categories = ["development-tools", "command-line-utilities"]
-include = ["build.rs", "src/**", "i18n/**", "schemas/**", "examples/**", "Cargo.toml", "README.md", "LICENSE"]
+include = ["build.rs", "src/**", "extensions/**", "i18n/**", "schemas/**", "Cargo.toml", "README.md", "LICENSE"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.{ archive-format }"

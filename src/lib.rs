@@ -12,6 +12,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "../extensions/bulk-ingest/mod.rs"]
+mod bulk_ingest;
+
 mod embedded_i18n {
     include!(concat!(env!("OUT_DIR"), "/embedded_i18n.rs"));
 }
@@ -22,6 +25,7 @@ pub const ANSWERS_SCHEMA: &str = "greentic.operala.answers.v1";
 pub const HANDOFF_SCHEMA: &str = "greentic.operala.handoff.v1";
 pub const READINESS_SCHEMA: &str = "greentic.operala.readiness.v1";
 pub const EXTENSION_RECONCILIATION: &str = "greentic.operala.reconciliation.v1";
+pub const EXTENSION_BULK_INGEST: &str = "greentic.operala.bulk_ingest.v1";
 
 const WIZARD_STAGES: &[&str] = &[
     "load_answers",
@@ -214,6 +218,8 @@ pub struct OperalaAnswers {
 pub struct CapabilityAnswers {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconciliation: Option<ReconciliationAnswers>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk_ingest: Option<BulkIngestAnswers>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,6 +246,31 @@ pub struct MatchingConfig {
     pub date_window_days: u32,
     pub auto_match_threshold: u8,
     pub review_threshold: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkIngestAnswers {
+    pub name: String,
+    #[serde(default)]
+    pub input_modes: Vec<String>,
+    pub record_collections: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub actions: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub expected_counts: BTreeMap<String, u64>,
+    pub validation: BulkIngestValidation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkIngestValidation {
+    #[serde(default = "default_true")]
+    pub atomic: bool,
+    #[serde(default = "default_true")]
+    pub dry_run: bool,
+    #[serde(default = "default_true")]
+    pub require_unique_ids: bool,
+    #[serde(default = "default_true")]
+    pub validate_references: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,6 +324,7 @@ pub trait OperaLaExtension {
 }
 
 static RECONCILIATION_EXTENSION: ReconciliationExtension = ReconciliationExtension;
+static BULK_INGEST_EXTENSION: bulk_ingest::BulkIngestExtension = bulk_ingest::BulkIngestExtension;
 
 pub struct ExtensionRegistry;
 
@@ -304,12 +336,13 @@ impl ExtensionRegistry {
     pub fn get(&self, id: &str) -> Option<&'static dyn OperaLaExtension> {
         match id {
             EXTENSION_RECONCILIATION => Some(&RECONCILIATION_EXTENSION),
+            EXTENSION_BULK_INGEST => Some(&BULK_INGEST_EXTENSION),
             _ => None,
         }
     }
 
     pub fn all(&self) -> Vec<&'static dyn OperaLaExtension> {
-        vec![&RECONCILIATION_EXTENSION]
+        vec![&RECONCILIATION_EXTENSION, &BULK_INGEST_EXTENSION]
     }
 }
 
@@ -323,7 +356,7 @@ pub struct OperaLaHandoff {
     pub team_optional: bool,
     pub sorla: HandoffSorla,
     pub sorx: SorxBindingTemplate,
-    pub bindings: ReconciliationBindings,
+    pub bindings: Value,
     pub input_modes: Vec<String>,
     pub schemas: BTreeMap<String, Value>,
     pub flows: Vec<String>,
@@ -602,15 +635,15 @@ impl ReconciliationExtension {
                 transport: "http".to_string(),
                 url: "runtime-provided".to_string(),
             },
-            bindings: ReconciliationBindings {
-                source_event: recon.source_event.clone(),
-                expected_record: recon.expected_record.clone(),
-                settlement_record: recon.settlement_record.clone(),
-                exception_record: recon.exception_record.clone(),
-                actions: recon.actions.clone(),
-                agent_endpoints: recon.agent_endpoints.clone(),
-                source_digest: sorla.source_digest.clone(),
-            },
+            bindings: json!({
+                "source_event": recon.source_event.clone(),
+                "expected_record": recon.expected_record.clone(),
+                "settlement_record": recon.settlement_record.clone(),
+                "exception_record": recon.exception_record.clone(),
+                "actions": recon.actions.clone(),
+                "agent_endpoints": recon.agent_endpoints.clone(),
+                "source_digest": sorla.source_digest.clone(),
+            }),
             input_modes: if recon.input_modes.is_empty() {
                 vec!["single".to_string(), "batch".to_string()]
             } else {
@@ -726,7 +759,13 @@ pub fn prompt_answers(args: &PromptArgs) -> OperalaResult<OperalaAnswers> {
         digest: None,
     })?;
     let lower_prompt = args.prompt.to_ascii_lowercase();
-    let capability = if lower_prompt.contains("reconcil")
+    let capability = if lower_prompt.contains("bulk ingest")
+        || lower_prompt.contains("bulk upload")
+        || lower_prompt.contains("batch upload")
+        || lower_prompt.contains("upload operation")
+    {
+        "bulk_ingest"
+    } else if lower_prompt.contains("reconcil")
         || lower_prompt.contains("bank transaction")
         || lower_prompt.contains("rent payment")
         || lower_prompt.contains("invoice payment")
@@ -738,12 +777,30 @@ pub fn prompt_answers(args: &PromptArgs) -> OperalaResult<OperalaAnswers> {
         ));
     };
 
-    let reconciliation = infer_reconciliation_answers(&sorla)?;
+    let (extension, reconciliation, bulk_ingest, output_name) = if capability == "bulk_ingest" {
+        let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
+        (
+            EXTENSION_BULK_INGEST.to_string(),
+            None,
+            Some(bulk.clone()),
+            bulk.name.clone(),
+        )
+    } else {
+        let reconciliation = infer_reconciliation_answers(&sorla)?;
+        (
+            EXTENSION_RECONCILIATION.to_string(),
+            Some(reconciliation.clone()),
+            None,
+            reconciliation.name.clone(),
+        )
+    };
+    let work_dir = PathBuf::from(format!("target/operala/{output_name}"));
+    let gtpack_file_name = format!("{}.gtpack", output_name.replace('_', "-"));
     Ok(OperalaAnswers {
         schema: ANSWERS_SCHEMA.to_string(),
         intent: args.prompt.clone(),
         detected_capability: Some(capability.to_string()),
-        extension: EXTENSION_RECONCILIATION.to_string(),
+        extension,
         locale: args.locale.clone(),
         tenant: args.tenant.clone(),
         team: args.team.clone(),
@@ -756,22 +813,17 @@ pub fn prompt_answers(args: &PromptArgs) -> OperalaResult<OperalaAnswers> {
             expected_schema: Some("greentic.sorla.v0.2".to_string()),
         },
         outputs: OutputConfig {
-            handoff_path: Some(PathBuf::from(format!(
-                "target/operala/{}/operala-handoff.json",
-                reconciliation.name
-            ))),
-            gtpack_path: Some(PathBuf::from(format!(
-                "target/gtpacks/{}.gtpack",
-                reconciliation.name.replace('_', "-")
-            ))),
-            work_dir: PathBuf::from(format!("target/operala/{}", reconciliation.name)),
+            handoff_path: Some(work_dir.join("operala-handoff.json")),
+            gtpack_path: Some(work_dir.join(gtpack_file_name)),
+            work_dir,
         },
         approval: ApprovalConfig {
             allow_sorla_patch_proposal: true,
             apply_sorla_patch: false,
         },
         capability_answers: CapabilityAnswers {
-            reconciliation: Some(reconciliation),
+            reconciliation,
+            bulk_ingest,
         },
         assumptions: Vec::new(),
     })
@@ -912,8 +964,19 @@ pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
     write_json_file(&handoff_path, &handoff)?;
     write_handoff_assets(&answers.outputs.work_dir, &handoff)?;
 
-    if let Some(gtpack_path) = &answers.outputs.gtpack_path {
-        write_operala_gtpack(gtpack_path, &handoff)?;
+    let work_dir_gtpack_path = answers.outputs.work_dir.join(format!(
+        "{}.gtpack",
+        capability_output_name(answers, &handoff).replace('_', "-")
+    ));
+    let configured_gtpack_path = answers.outputs.gtpack_path.clone();
+    let primary_gtpack_path = configured_gtpack_path
+        .clone()
+        .unwrap_or_else(|| work_dir_gtpack_path.clone());
+    if primary_gtpack_path == work_dir_gtpack_path {
+        write_operala_gtpack(&primary_gtpack_path, &handoff)?;
+    } else {
+        write_operala_gtpack(&primary_gtpack_path, &handoff)?;
+        write_operala_gtpack(&work_dir_gtpack_path, &handoff)?;
     }
     write_wizard_state(
         &state_path,
@@ -955,7 +1018,8 @@ pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
         "lock_path": lock_path,
         "state_path": state_path,
         "summary_path": summary_path,
-        "gtpack_path": answers.outputs.gtpack_path,
+        "gtpack_path": work_dir_gtpack_path,
+        "configured_gtpack_path": configured_gtpack_path,
         "warnings": readiness.warnings,
         "missing": readiness.missing
     }))
@@ -1030,59 +1094,82 @@ pub fn validate_answers(answers: &OperalaAnswers) -> OperalaResult<()> {
         )
         .to_string());
     }
-    let recon = answers
-        .capability_answers
-        .reconciliation
-        .as_ref()
-        .ok_or_else(|| "capability_answers.reconciliation is required".to_string())?;
-    if recon.input_modes.is_empty() {
-        return Err("capability_answers.reconciliation.input_modes is required".to_string());
-    }
-    for mode in &recon.input_modes {
-        if mode != "single" && mode != "batch" {
-            return Err(format!(
-                "capability_answers.reconciliation.input_modes contains unsupported mode `{mode}`"
-            ));
+    if answers.extension == EXTENSION_RECONCILIATION {
+        let recon = answers
+            .capability_answers
+            .reconciliation
+            .as_ref()
+            .ok_or_else(|| "capability_answers.reconciliation is required".to_string())?;
+        if recon.input_modes.is_empty() {
+            return Err("capability_answers.reconciliation.input_modes is required".to_string());
         }
-    }
-    require_map_keys(
-        "capability_answers.reconciliation.source_fields",
-        &recon.source_fields,
-        &["external_id", "amount", "date", "reference", "currency"],
-    )?;
-    require_map_keys(
-        "capability_answers.reconciliation.expected_fields",
-        &recon.expected_fields,
-        &["id", "amount", "due_date", "reference", "status"],
-    )?;
-    require_map_keys(
-        "capability_answers.reconciliation.exception_policy",
-        &recon.exception_policy,
-        &[
-            "partial_payment",
-            "ambiguous_match",
-            "unmatched",
-            "duplicate_possible",
-        ],
-    )?;
-    require_map_keys(
-        "capability_answers.reconciliation.actions",
-        &recon.actions,
-        &[
-            "create_settlement",
-            "mark_paid",
-            "mark_partially_paid",
-            "create_exception",
-        ],
-    )?;
-    if recon.matching.auto_match_threshold > 100 || recon.matching.review_threshold > 100 {
-        return Err("matching thresholds must be percentages from 0 to 100".to_string());
-    }
-    if recon.matching.auto_match_threshold < recon.matching.review_threshold {
-        return Err(
-            "matching.auto_match_threshold must be greater than or equal to review_threshold"
-                .to_string(),
-        );
+        for mode in &recon.input_modes {
+            if mode != "single" && mode != "batch" {
+                return Err(format!(
+                    "capability_answers.reconciliation.input_modes contains unsupported mode `{mode}`"
+                ));
+            }
+        }
+        require_map_keys(
+            "capability_answers.reconciliation.source_fields",
+            &recon.source_fields,
+            &["external_id", "amount", "date", "reference", "currency"],
+        )?;
+        require_map_keys(
+            "capability_answers.reconciliation.expected_fields",
+            &recon.expected_fields,
+            &["id", "amount", "due_date", "reference", "status"],
+        )?;
+        require_map_keys(
+            "capability_answers.reconciliation.exception_policy",
+            &recon.exception_policy,
+            &[
+                "partial_payment",
+                "ambiguous_match",
+                "unmatched",
+                "duplicate_possible",
+            ],
+        )?;
+        require_map_keys(
+            "capability_answers.reconciliation.actions",
+            &recon.actions,
+            &[
+                "create_settlement",
+                "mark_paid",
+                "mark_partially_paid",
+                "create_exception",
+            ],
+        )?;
+        if recon.matching.auto_match_threshold > 100 || recon.matching.review_threshold > 100 {
+            return Err("matching thresholds must be percentages from 0 to 100".to_string());
+        }
+        if recon.matching.auto_match_threshold < recon.matching.review_threshold {
+            return Err(
+                "matching.auto_match_threshold must be greater than or equal to review_threshold"
+                    .to_string(),
+            );
+        }
+    } else if answers.extension == EXTENSION_BULK_INGEST {
+        let bulk = answers
+            .capability_answers
+            .bulk_ingest
+            .as_ref()
+            .ok_or_else(|| "capability_answers.bulk_ingest is required".to_string())?;
+        if bulk.name.trim().is_empty() {
+            return Err("capability_answers.bulk_ingest.name is required".to_string());
+        }
+        if bulk.record_collections.is_empty() {
+            return Err(
+                "capability_answers.bulk_ingest.record_collections is required".to_string(),
+            );
+        }
+        for mode in &bulk.input_modes {
+            if mode != "batch" {
+                return Err(format!(
+                    "capability_answers.bulk_ingest.input_modes contains unsupported mode `{mode}`"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1455,6 +1542,22 @@ fn build_summary(readiness: &ReadinessReport, handoff: &OperaLaHandoff) -> Strin
     )
 }
 
+fn capability_output_name(answers: &OperalaAnswers, handoff: &OperaLaHandoff) -> String {
+    answers
+        .capability_answers
+        .bulk_ingest
+        .as_ref()
+        .map(|bulk| bulk.name.clone())
+        .or_else(|| {
+            answers
+                .capability_answers
+                .reconciliation
+                .as_ref()
+                .map(|recon| recon.name.clone())
+        })
+        .unwrap_or_else(|| handoff.capability.clone())
+}
+
 fn write_wizard_state(
     path: &Path,
     status: &str,
@@ -1488,9 +1591,11 @@ fn write_wizard_state(
 fn write_handoff_assets(work_dir: &Path, handoff: &OperaLaHandoff) -> OperalaResult<()> {
     write_yaml_file(work_dir.join("operala.yaml"), handoff)?;
     write_json_file(
-        work_dir.join("capability").join("reconciliation.json"),
+        work_dir
+            .join("capability")
+            .join(format!("{}.json", handoff.capability)),
         &json!({
-            "schema": "greentic.operala.capability.reconciliation.v1",
+            "schema": format!("greentic.operala.capability.{}.v1", handoff.capability),
             "handoff_schema": handoff.schema,
             "sorla_source_digest": handoff.sorla.source_digest,
             "bindings": handoff.bindings,
@@ -1514,24 +1619,35 @@ fn write_handoff_assets(work_dir: &Path, handoff: &OperaLaHandoff) -> OperalaRes
             &json!({"schema": "greentic.operala.flow.v1", "name": flow}),
         )?;
     }
-    write_json_file(
-        work_dir
-            .join("ui")
-            .join("reconciliation-exception.card.json"),
-        &json!({"schema": "greentic.operala.ui.card.v1", "name": "reconciliation_exception"}),
-    )?;
-    write_json_file(
-        work_dir.join("tests").join("one-transaction.json"),
-        &json!({"transaction_id": "bank_tx_001", "amount": 1200.00, "currency": "EUR", "reference": "TEN-001"}),
-    )?;
-    write_json_file(
-        work_dir.join("tests").join("daily-transactions.json"),
-        &json!({"batch_id": "daily_001", "transactions": []}),
-    )?;
-    write_json_file(
-        work_dir.join("tests").join("expected-decisions.json"),
-        &json!([]),
-    )?;
+    if handoff.capability == "reconciliation" {
+        write_json_file(
+            work_dir
+                .join("ui")
+                .join("reconciliation-exception.card.json"),
+            &json!({"schema": "greentic.operala.ui.card.v1", "name": "reconciliation_exception"}),
+        )?;
+        write_json_file(
+            work_dir.join("tests").join("one-transaction.json"),
+            &json!({"transaction_id": "bank_tx_001", "amount": 1200.00, "currency": "EUR", "reference": "TEN-001"}),
+        )?;
+        write_json_file(
+            work_dir.join("tests").join("daily-transactions.json"),
+            &json!({"batch_id": "daily_001", "transactions": []}),
+        )?;
+        write_json_file(
+            work_dir.join("tests").join("expected-decisions.json"),
+            &json!([]),
+        )?;
+    } else if handoff.capability == "bulk_ingest" {
+        write_json_file(
+            work_dir.join("ui").join("bulk-upload-summary.card.json"),
+            &json!({"schema": "greentic.operala.ui.card.v1", "name": "bulk_upload_summary"}),
+        )?;
+        write_json_file(
+            work_dir.join("tests").join("bulk-upload.sample.json"),
+            &json!({"batch_id": "bulk_001", "dry_run": true, "records": {}}),
+        )?;
+    }
     Ok(())
 }
 
@@ -1757,11 +1873,36 @@ fn pick(candidates: &[String], preferred: &[&str]) -> Option<String> {
         .or_else(|| candidates.first().cloned())
 }
 
+fn to_snake_case(value: &str) -> String {
+    let mut output = String::new();
+    let mut previous_was_separator = false;
+    for (index, ch) in value.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 && !previous_was_separator {
+                output.push('_');
+            }
+            output.push(ch.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_lowercase());
+            previous_was_separator = false;
+        } else if !previous_was_separator && !output.is_empty() {
+            output.push('_');
+            previous_was_separator = true;
+        }
+    }
+    output.trim_matches('_').to_string()
+}
+
 fn map<const N: usize>(pairs: [(&str, &str); N]) -> BTreeMap<String, String> {
     pairs
         .into_iter()
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn resolve_local_path(
@@ -2020,9 +2161,10 @@ mod tests {
 
     #[test]
     fn validates_fixture_answers() {
-        let answers: OperalaAnswers =
-            serde_json::from_str(include_str!("../examples/tenancy/answers.json"))
-                .expect("fixture answers parse");
+        let answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
         validate_answers(&answers).expect("fixture answers validate");
     }
 
@@ -2030,7 +2172,7 @@ mod tests {
     fn fixture_sorla_contract_has_reconciliation_parts() {
         let sorla = load_sorla_contract(&SourceRef {
             kind: SourceKind::File,
-            uri: "examples/tenancy/sorla.yaml".to_string(),
+            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
             digest: None,
         })
         .expect("fixture sorla loads");
@@ -2142,8 +2284,10 @@ mod tests {
 
     #[test]
     fn validation_rejects_missing_required_answer_fields() {
-        let base: Value = serde_json::from_str(include_str!("../examples/tenancy/answers.json"))
-            .expect("fixture json parses");
+        let base: Value = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture json parses");
         for field in ["schema", "intent", "sorla", "extension", "outputs"] {
             let mut value = base.clone();
             value.as_object_mut().unwrap().remove(field);
@@ -2159,9 +2303,10 @@ mod tests {
 
     #[test]
     fn locale_and_team_are_optional() {
-        let mut answers: OperalaAnswers =
-            serde_json::from_str(include_str!("../examples/tenancy/answers.json"))
-                .expect("fixture answers parse");
+        let mut answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
         answers.locale = None;
         answers.team = None;
         validate_answers(&answers).expect("locale and team are optional");
@@ -2169,9 +2314,10 @@ mod tests {
 
     #[test]
     fn validation_rejects_incomplete_reconciliation_answers() {
-        let answers: OperalaAnswers =
-            serde_json::from_str(include_str!("../examples/tenancy/answers.json"))
-                .expect("fixture answers parse");
+        let answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
 
         let mut missing_currency = answers.clone();
         missing_currency
@@ -2209,7 +2355,7 @@ mod tests {
     #[test]
     fn prompt_infers_reconciliation_answers_from_payment_language() {
         let answers = prompt_answers(&PromptArgs {
-            sorla: "examples/tenancy/sorla.yaml".to_string(),
+            sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
             tenant: Some("acme-property".to_string()),
             team: Some("property-ops".to_string()),
             locale: Some("en-GB".to_string()),
@@ -2247,7 +2393,7 @@ mod tests {
     #[test]
     fn prompt_reports_follow_up_when_capability_is_unclear() {
         let err = prompt_answers(&PromptArgs {
-            sorla: "examples/tenancy/sorla.yaml".to_string(),
+            sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
             tenant: Some("acme-property".to_string()),
             team: None,
             locale: None,
@@ -2282,19 +2428,53 @@ mod tests {
                 .iter()
                 .any(|question| question["id"] == "expected_record")
         );
+        assert!(
+            extensions
+                .iter()
+                .any(|extension| extension["flow"] == "operala.bulk_ingest")
+        );
+    }
+
+    #[test]
+    fn prompt_infers_generic_bulk_ingest_answers() {
+        let answers = prompt_answers(&PromptArgs {
+            sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
+            tenant: Some("demo-tenant".to_string()),
+            team: Some("finance".to_string()),
+            locale: Some("en-GB".to_string()),
+            output: None,
+            prompt: "Create a generic bulk upload operation from a JSON batch file with exactly 3 tenants, 3 tenancies, and 6 payments.".to_string(),
+        })
+        .expect("bulk upload prompt produces answers");
+
+        assert_eq!(answers.extension, EXTENSION_BULK_INGEST);
+        assert_eq!(answers.detected_capability.as_deref(), Some("bulk_ingest"));
+        let bulk = answers
+            .capability_answers
+            .bulk_ingest
+            .as_ref()
+            .expect("bulk ingest answers are nested");
+        assert_eq!(bulk.name, "generic_bulk_ingest");
+        assert_eq!(bulk.record_collections.get("tenant").unwrap(), "Tenant");
+        assert_eq!(bulk.record_collections.get("payment").unwrap(), "Payment");
+        assert_eq!(bulk.expected_counts.get("Tenant"), Some(&3));
+        assert_eq!(bulk.expected_counts.get("Tenancy"), Some(&3));
+        assert_eq!(bulk.expected_counts.get("Payment"), Some(&6));
+        validate_answers(&answers).expect("bulk ingest answers validate");
     }
 
     #[test]
     fn readiness_reports_ready_missing_and_ambiguous_states() {
         let sorla = load_sorla_contract(&SourceRef {
             kind: SourceKind::File,
-            uri: "examples/tenancy/sorla.yaml".to_string(),
+            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
             digest: None,
         })
         .expect("fixture sorla loads");
-        let mut answers: OperalaAnswers =
-            serde_json::from_str(include_str!("../examples/tenancy/answers.json"))
-                .expect("fixture answers parse");
+        let mut answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
         answers.locale = Some("nl-NL".to_string());
 
         let ready = RECONCILIATION_EXTENSION
@@ -2351,13 +2531,14 @@ mod tests {
     fn missing_records_generate_additive_sorla_patch_proposal() {
         let sorla = load_sorla_contract(&SourceRef {
             kind: SourceKind::File,
-            uri: "examples/tenancy/sorla.yaml".to_string(),
+            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
             digest: None,
         })
         .expect("fixture sorla loads");
-        let mut answers: OperalaAnswers =
-            serde_json::from_str(include_str!("../examples/tenancy/answers.json"))
-                .expect("fixture answers parse");
+        let mut answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
         let root = std::env::temp_dir().join(format!(
             "operala-patch-proposal-test-{}",
             std::process::id()
@@ -2400,9 +2581,10 @@ mod tests {
 
     #[test]
     fn wizard_writes_resumable_state_and_summary() {
-        let mut answers: OperalaAnswers =
-            serde_json::from_str(include_str!("../examples/tenancy/answers.json"))
-                .expect("fixture answers parse");
+        let mut answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
         let root =
             std::env::temp_dir().join(format!("operala-wizard-state-test-{}", std::process::id()));
         answers.outputs.work_dir = root.join("work");
@@ -2426,22 +2608,31 @@ mod tests {
             &fs::read(root.join("work").join("operala-handoff.json")).unwrap(),
         )
         .expect("handoff parses");
-        assert_eq!(handoff.bindings.source_event, "BankTransaction");
+        assert_eq!(handoff.bindings["source_event"], "BankTransaction");
         assert_eq!(
-            handoff.bindings.actions.get("create_settlement").unwrap(),
+            handoff.bindings["actions"]["create_settlement"],
             "create_payment"
         );
         assert_eq!(
-            handoff
-                .bindings
-                .agent_endpoints
-                .get("create_settlement")
-                .unwrap(),
+            handoff.bindings["agent_endpoints"]["create_settlement"],
             "create_payment"
         );
-        assert_eq!(handoff.bindings.source_digest, handoff.sorla.source_digest);
+        assert_eq!(
+            handoff.bindings["source_digest"],
+            Value::String(handoff.sorla.source_digest.clone())
+        );
         let pack_path = root.join("pack.gtpack");
         assert!(pack_path.is_file());
+        let work_dir_pack_path = root.join("work").join("tenancy-rent-reconciliation.gtpack");
+        assert!(work_dir_pack_path.is_file());
+        assert_eq!(
+            first["gtpack_path"],
+            Value::String(work_dir_pack_path.to_string_lossy().to_string())
+        );
+        assert_eq!(
+            first["configured_gtpack_path"],
+            Value::String(pack_path.to_string_lossy().to_string())
+        );
         let file = fs::File::open(&pack_path).expect("pack opens");
         let mut archive = zip::ZipArchive::new(file).expect("pack is a zip archive");
         assert!(archive.by_name("manifest.cbor").is_ok());
@@ -2481,9 +2672,10 @@ mod tests {
         let registry = ExtensionRegistry::built_in();
         assert!(registry.get(EXTENSION_RECONCILIATION).is_some());
 
-        let mut answers: OperalaAnswers =
-            serde_json::from_str(include_str!("../examples/tenancy/answers.json"))
-                .expect("fixture answers parse");
+        let mut answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
         let root = std::env::temp_dir().join(format!(
             "operala-unknown-extension-test-{}",
             std::process::id()
