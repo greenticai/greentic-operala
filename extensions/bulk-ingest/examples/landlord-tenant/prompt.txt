@@ -1,0 +1,44 @@
+Create a landlord-tenant portfolio bulk upload operation from a JSON batch file.
+
+Use the existing landlord-tenant SoRLa records and actions:
+- CreateLandlord for the landlord.
+- CreateBuilding for each building.
+- CreateUnit for each unit.
+- CreateTenant for each tenant.
+- AssignTenantToUnit for each tenancy.
+- RecordRentPayment for each payment.
+- AddMaintenanceRequest for each maintenance request.
+
+The operation should accept one bulk upload JSON document and validate it before
+writing anything. Treat the upload as one atomic job: if validation fails, return
+a structured error report and do not create partial records.
+
+The upload must create exactly:
+- 1 landlord.
+- 5 buildings for that landlord.
+- 20 units per building, 100 units total.
+- 95 tenants.
+- 95 active tenancies, each linking one tenant to one unit.
+- 280 rent payments linked to those tenancies.
+- 5 tenants with outstanding payments.
+- 5 maintenance requests, one related to each tenant with an outstanding payment.
+
+Rules:
+- Every generated id in the input must be unique and stable within the batch.
+- Every building must reference the uploaded landlord.
+- Every unit must reference one uploaded building.
+- Every tenancy must reference one uploaded tenant and one uploaded unit.
+- No unit may have more than one active tenancy.
+- Five units must remain vacant.
+- Every payment must reference one uploaded tenancy.
+- Payment status must be paid, partial, outstanding, or failed.
+- Exactly 5 tenants must have at least one outstanding payment.
+- Maintenance requests must reference the tenant, unit, and building associated
+  with those 5 outstanding-payment tenancies.
+- The result should report created counts for landlords, buildings, units,
+  tenants, tenancies, payments, and maintenance requests.
+
+Support a dry-run mode that performs all validation and returns the planned
+counts without creating records.
+
+Name the capability landlord_tenant_bulk_upload.

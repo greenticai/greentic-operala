@@ -9,13 +9,13 @@
   "sorla": {
     "source": {
       "kind": "file",
-      "uri": "./examples/tenancy/sorla.yaml"
+      "uri": "extensions/reconciliation/examples/tenancy/sorla.yaml"
     },
     "expected_schema": "greentic.sorla.v0.2"
   },
   "outputs": {
     "handoff_path": "./target/operala/tenancy-rent-reconciliation/operala-handoff.json",
-    "gtpack_path": "./target/gtpacks/tenancy-rent-reconciliation.gtpack",
+    "gtpack_path": "./target/operala/tenancy-rent-reconciliation/tenancy-rent-reconciliation.gtpack",
     "work_dir": "./target/operala/tenancy-rent-reconciliation"
   },
   "approval": {
