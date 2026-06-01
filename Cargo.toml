@@ -2,6 +2,7 @@
 name = "greentic-operala"
 version = "0.1.1"
 edition = "2024"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/greenticai/greentic-operala"
 homepage = "https://github.com/greenticai/greentic-operala"
