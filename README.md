@@ -33,10 +33,10 @@ cargo binstall greentic-operala
 cargo binstall greentic-operax
 ```
 
-For local development, run the OperaLa binary from this checkout:
+Check the installed OperaLa binary:
 
 ```bash
-cargo run --bin greentic-operala -- --help
+greentic-operala --help
 ```
 
 ## Quick Example
@@ -44,7 +44,7 @@ cargo run --bin greentic-operala -- --help
 Generate answers from the tenancy reconciliation prompt:
 
 ```bash
-cargo run --bin greentic-operala -- prompt \
+greentic-operala prompt \
   --locale en-GB \
   --tenant demo-tenant \
   --team property-ops \
@@ -56,7 +56,7 @@ cargo run --bin greentic-operala -- prompt \
 Turn those answers into handoff artifacts and a `.gtpack`:
 
 ```bash
-cargo run --bin greentic-operala -- wizard \
+greentic-operala wizard \
   --answers target/operala-demo/answers.json \
   --locale en-GB
 ```
@@ -111,8 +111,8 @@ kill "$mock_pid"
 Show localized help:
 
 ```bash
-cargo run --bin greentic-operala -- --help --locale de
-cargo run --bin greentic-operala -- wizard --schema --locale nl
+greentic-operala --help --locale de
+greentic-operala wizard --schema --locale nl
 ```
 
 Run the core checks:
@@ -137,4 +137,3 @@ The full local check expects `greentic-operax` to be installed on `PATH`.
 - OperaLa owns operational handoff authoring.
 - OperaX runs OperaLa handoff packs against SORX.
 - `greentic-pack` builds the `.gtpack` package format.
-
