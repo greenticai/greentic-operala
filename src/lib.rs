@@ -3056,4 +3056,90 @@ mod tests {
             outcome.diff
         );
     }
+
+    #[test]
+    fn llm_classifier_fallback_routes_non_keyword_prompt() {
+        // Plain-content classification response (classifier reads message content).
+        fn classify(content: &str) -> greentic_llm::ChatResponse {
+            greentic_llm::ChatResponse {
+                content: content.into(),
+                tool_calls: vec![],
+                finish_reason: greentic_llm::FinishReason::Stop,
+            }
+        }
+        let recon_value: serde_json::Value = {
+            let fixture: OperalaAnswers = serde_json::from_str(include_str!(
+                "../extensions/reconciliation/examples/tenancy/answers.json"
+            ))
+            .unwrap();
+            serde_json::to_value(fixture.capability_answers.reconciliation.unwrap()).unwrap()
+        };
+        let chat = inference::tests_support::scripted_chat(vec![
+            classify(r#"{"capability": "reconciliation"}"#),
+            inference::tests_support::emit(recon_value),
+        ]);
+        let answers = prompt_answers_with_llm(
+            &PromptArgs {
+                sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+                locale: Some("en-GB".into()),
+                output: None,
+                tenant: Some("acme".into()),
+                team: None,
+                llm_provider: None,
+                llm_model: None,
+                no_llm: false,
+                existing: None,
+                in_place: false,
+                // deliberately keyword-free so the classifier branch runs:
+                prompt: "help me settle incoming money against what tenants owe".into(),
+            },
+            Some(&chat),
+        )
+        .expect("classifier-routed prompt produces answers");
+        assert_eq!(answers.extension, EXTENSION_RECONCILIATION);
+        assert_eq!(
+            answers.detected_capability.as_deref(),
+            Some("reconciliation")
+        );
+        validate_answers(&answers).expect("validates");
+    }
+
+    #[test]
+    fn llm_bulk_ingest_new_mode_produces_validated_answers() {
+        let bulk_value = serde_json::json!({
+            "name": "tenancy_bulk_ingest",
+            "input_modes": ["batch"],
+            "record_collections": { "payments": "Payment" },
+            "actions": { "create_payment": "create_payment" },
+            "validation": { "atomic": true, "dry_run": true, "require_unique_ids": true, "validate_references": true }
+        });
+        let chat = inference::tests_support::scripted_chat(vec![inference::tests_support::emit(
+            bulk_value,
+        )]);
+        let answers = prompt_answers_with_llm(
+            &PromptArgs {
+                sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+                locale: Some("en-GB".into()),
+                output: None,
+                tenant: Some("acme".into()),
+                team: None,
+                llm_provider: None,
+                llm_model: None,
+                no_llm: false,
+                existing: None,
+                in_place: false,
+                prompt: "bulk ingest historical records".into(),
+            },
+            Some(&chat),
+        )
+        .expect("bulk llm prompt produces answers");
+        assert_eq!(answers.extension, EXTENSION_BULK_INGEST);
+        let bulk = answers
+            .capability_answers
+            .bulk_ingest
+            .as_ref()
+            .expect("nested bulk");
+        assert!(!bulk.record_collections.is_empty());
+        validate_answers(&answers).expect("validates");
+    }
 }
