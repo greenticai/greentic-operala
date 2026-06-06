@@ -19,6 +19,8 @@ mod embedded_i18n {
     include!(concat!(env!("OUT_DIR"), "/embedded_i18n.rs"));
 }
 
+pub mod inference;
+
 pub type OperalaResult<T> = Result<T, String>;
 
 pub const ANSWERS_SCHEMA: &str = "greentic.operala.answers.v1";
