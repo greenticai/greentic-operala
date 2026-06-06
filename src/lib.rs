@@ -778,7 +778,7 @@ pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
                 None => {
                     if !args.no_llm {
                         eprintln!(
-                            "greentic-operala: no LLM configured (set GREENTIC_LLM_PROVIDER/GREENTIC_LLM_MODEL or pass --llm-provider/--llm-model); using the deterministic keyword path"
+                            "greentic-operala: note: no LLM configured; using the deterministic keyword path (set GREENTIC_LLM_PROVIDER/GREENTIC_LLM_MODEL or pass --llm-provider/--llm-model to enable LLM inference)"
                         );
                     }
                     None
@@ -836,7 +836,7 @@ pub fn prompt_answers_with_llm(
         uri: args.sorla.clone(),
         digest: None,
     })?;
-    let capability = detect_capability(&args.prompt, llm, &sorla)?;
+    let capability = detect_capability(&args.prompt, llm)?;
 
     let (extension, reconciliation, bulk_ingest, output_name) = match (capability, llm) {
         ("reconciliation", Some(chat)) => {
@@ -883,7 +883,7 @@ pub fn prompt_answers_with_llm(
                 bulk.name.clone(),
             )
         }
-        (_, None) => {
+        ("reconciliation", None) => {
             let reconciliation = infer_reconciliation_answers(&sorla)?;
             (
                 EXTENSION_RECONCILIATION.to_string(),
@@ -891,6 +891,9 @@ pub fn prompt_answers_with_llm(
                 None,
                 reconciliation.name.clone(),
             )
+        }
+        (other, None) => {
+            return Err(format!("unsupported capability '{other}'"));
         }
         (other, Some(_)) => {
             return Err(format!("unsupported capability '{other}'"));
@@ -934,7 +937,6 @@ pub fn prompt_answers_with_llm(
 fn detect_capability(
     prompt: &str,
     llm: Option<&dyn inference::ChatFn>,
-    sorla: &SorlaContract,
 ) -> OperalaResult<&'static str> {
     let lower_prompt = prompt.to_ascii_lowercase();
     if lower_prompt.contains("bulk ingest")
@@ -952,15 +954,15 @@ fn detect_capability(
         return Ok("reconciliation");
     }
     if let Some(chat) = llm
-        && let Some(capability) = inference::classify_capability(chat, prompt, sorla)?
+        && let Some(capability) = inference::classify_capability(chat, prompt)?
     {
         return Ok(match capability.as_str() {
             "reconciliation" => "reconciliation",
             "bulk_ingest" => "bulk_ingest",
             _ => {
-                return Err(follow_up_required(
-                    "Which operational capability should OperaLa author for this SoRLa contract?",
-                ));
+                return Err(follow_up_required(&format!(
+                    "the LLM classified this as '{capability}', which OperaLa does not author; which operational capability should it use for this SoRLa contract?"
+                )));
             }
         });
     }

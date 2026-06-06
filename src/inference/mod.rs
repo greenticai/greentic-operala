@@ -75,13 +75,10 @@ pub fn infer_capability_answers(
 }
 
 /// One-shot capability classification for prompts the keyword fast-path could
-/// not place. Returns None for "unknown".
-pub fn classify_capability(
-    chat: &dyn ChatFn,
-    intent: &str,
-    sorla: &SorlaContract,
-) -> OperalaResult<Option<String>> {
-    let catalog = catalog::sorla_catalog(sorla);
+/// not place. Returns None for "unknown". Deliberately does NOT include the
+/// SoRLa catalog — the classification is between named capabilities and the
+/// catalog only adds noise and prompt-injection surface.
+pub fn classify_capability(chat: &dyn ChatFn, intent: &str) -> OperalaResult<Option<String>> {
     let request = greentic_llm::ChatRequest {
         messages: vec![
             greentic_llm::ChatMessage {
@@ -91,10 +88,7 @@ pub fn classify_capability(
             },
             greentic_llm::ChatMessage {
                 role: greentic_llm::MessageRole::User,
-                content: format!(
-                    "SoRLa catalog:\n{}\n\nOperator intent: {intent}",
-                    serde_json::to_string_pretty(&catalog).unwrap_or_default()
-                ),
+                content: format!("Operator intent: {intent}"),
                 images: vec![],
             },
         ],

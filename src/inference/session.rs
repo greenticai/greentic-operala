@@ -267,4 +267,12 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn classification_passes_through_unexpected_capability_for_caller_to_guard() {
+        assert_eq!(
+            parse_classification(&text_response(r#"{"capability": "reporting"}"#)).unwrap(),
+            Some("reporting".to_string())
+        );
+    }
 }
