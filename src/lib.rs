@@ -787,6 +787,32 @@ pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
             let llm_ref = llm_runtime
                 .as_ref()
                 .map(|runtime| runtime as &dyn inference::ChatFn);
+            if let Some(existing_path) = &args.existing {
+                let Some(chat) = llm_ref else {
+                    return Err(
+                        "--existing (update mode) requires an LLM; pass --llm-provider/--llm-model or set GREENTIC_LLM_PROVIDER/GREENTIC_LLM_MODEL"
+                            .to_string(),
+                    );
+                };
+                let raw = fs::read_to_string(existing_path)
+                    .map_err(|err| format!("failed to read {}: {err}", existing_path.display()))?;
+                let existing: OperalaAnswers = serde_json::from_str(&raw).map_err(to_string)?;
+                let outcome =
+                    inference::update_answers(chat, &existing, &args.sorla, &args.prompt)?;
+                let output = match (&args.output, args.in_place) {
+                    (Some(output), _) => output.clone(),
+                    (None, true) => existing_path.clone(),
+                    (None, false) => existing_path.with_file_name("answers.updated.json"),
+                };
+                write_json_file(&output, &outcome.answers)?;
+                if outcome.diff.is_empty() {
+                    println!("no changes");
+                } else {
+                    println!("{}", inference::diff::format_diff(&outcome.diff));
+                }
+                println!("updated answers written to {}", output.display());
+                return Ok(());
+            }
             let answers = prompt_answers_with_llm(&args, llm_ref)?;
             let output = args
                 .output
@@ -2985,6 +3011,49 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&via_wrapper).unwrap(),
             serde_json::to_string(&via_llm_none).unwrap()
+        );
+    }
+
+    #[test]
+    fn update_mode_changes_only_the_instructed_field() {
+        let existing: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .unwrap();
+        let mut updated_value =
+            serde_json::to_value(existing.capability_answers.reconciliation.clone().unwrap())
+                .unwrap();
+        updated_value["matching"]["amount_tolerance"] = serde_json::json!(5.0);
+        let chat = inference::tests_support::scripted_chat(vec![inference::tests_support::emit(
+            updated_value,
+        )]);
+
+        let outcome = inference::update_answers(
+            &chat,
+            &existing,
+            "extensions/reconciliation/examples/tenancy/sorla.yaml",
+            "raise the amount tolerance to 5",
+        )
+        .expect("update succeeds");
+
+        let updated_reconciliation = outcome
+            .answers
+            .capability_answers
+            .reconciliation
+            .as_ref()
+            .expect("nested");
+        assert_eq!(updated_reconciliation.matching.amount_tolerance, 5.0);
+        // Envelope preserved:
+        assert_eq!(outcome.answers.tenant, existing.tenant);
+        assert_eq!(outcome.answers.outputs.work_dir, existing.outputs.work_dir);
+        // Diff names the changed capability path (intent also changes — assert the capability change is present):
+        assert!(
+            outcome
+                .diff
+                .iter()
+                .any(|e| e.path == "capability_answers.reconciliation.matching.amount_tolerance"),
+            "diff: {:?}",
+            outcome.diff
         );
     }
 }

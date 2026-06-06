@@ -3,6 +3,7 @@
 //! `lib.rs`; this module is only entered when an LLM is configured.
 
 pub mod catalog;
+pub mod diff;
 pub mod session;
 pub mod validate;
 
@@ -101,6 +102,77 @@ pub fn classify_capability(chat: &dyn ChatFn, intent: &str) -> OperalaResult<Opt
         .chat(request)
         .map_err(|err| format!("LLM classification failed: {err}"))?;
     session::parse_classification(&response)
+}
+
+pub struct UpdateOutcome {
+    pub answers: crate::OperalaAnswers,
+    pub diff: Vec<diff::DiffEntry>,
+}
+
+/// Update mode: regenerate the capability answers via LLM from the existing
+/// document + change instruction; preserve the outer envelope; return the
+/// validated document plus a structural diff for human review.
+pub fn update_answers(
+    chat: &dyn ChatFn,
+    existing: &crate::OperalaAnswers,
+    sorla_path: &str,
+    instruction: &str,
+) -> OperalaResult<UpdateOutcome> {
+    use crate::OperaLaExtension;
+
+    let sorla = crate::load_sorla_contract(&crate::SourceRef {
+        kind: crate::SourceKind::File,
+        uri: sorla_path.to_string(),
+        digest: None,
+    })?;
+    let (extension_id, schema, existing_value) = match (
+        &existing.capability_answers.reconciliation,
+        &existing.capability_answers.bulk_ingest,
+    ) {
+        (Some(reconciliation), _) => (
+            crate::EXTENSION_RECONCILIATION,
+            crate::RECONCILIATION_EXTENSION.answers_schema(),
+            serde_json::to_value(reconciliation).map_err(crate::to_string)?,
+        ),
+        (None, Some(bulk)) => (
+            crate::EXTENSION_BULK_INGEST,
+            crate::BULK_INGEST_EXTENSION.answers_schema(),
+            serde_json::to_value(bulk).map_err(crate::to_string)?,
+        ),
+        (None, None) => {
+            return Err("existing answers contain no capability answers to update".to_string());
+        }
+    };
+
+    let updated_value = infer_capability_answers(
+        chat,
+        extension_id,
+        &schema,
+        &sorla,
+        instruction,
+        Some(&existing_value),
+    )?;
+
+    let mut updated = existing.clone();
+    updated.intent = instruction.to_string();
+    match extension_id {
+        crate::EXTENSION_RECONCILIATION => {
+            updated.capability_answers.reconciliation =
+                Some(serde_json::from_value(updated_value).map_err(crate::to_string)?);
+        }
+        _ => {
+            updated.capability_answers.bulk_ingest =
+                Some(serde_json::from_value(updated_value).map_err(crate::to_string)?);
+        }
+    }
+    crate::validate_answers(&updated)?;
+
+    let old_doc = serde_json::to_value(existing).map_err(crate::to_string)?;
+    let new_doc = serde_json::to_value(&updated).map_err(crate::to_string)?;
+    Ok(UpdateOutcome {
+        answers: updated,
+        diff: diff::diff_values(&old_doc, &new_doc),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
