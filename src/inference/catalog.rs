@@ -21,7 +21,7 @@ pub fn sorla_catalog(sorla: &SorlaContract) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{load_sorla_contract, SourceKind, SourceRef};
+    use crate::{SourceKind, SourceRef, load_sorla_contract};
 
     #[test]
     fn catalog_lists_all_bindable_identifiers() {

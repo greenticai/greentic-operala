@@ -3,12 +3,18 @@
 //! this module disposes.
 
 use crate::{
-    BulkIngestAnswers, ReconciliationAnswers, SorlaContract, EXTENSION_BULK_INGEST,
-    EXTENSION_RECONCILIATION,
+    BulkIngestAnswers, EXTENSION_BULK_INGEST, EXTENSION_RECONCILIATION, ReconciliationAnswers,
+    SorlaContract,
 };
 use serde_json::Value;
 
-fn check_membership(errors: &mut Vec<String>, path: &str, value: &str, catalog: &[String], kind: &str) {
+fn check_membership(
+    errors: &mut Vec<String>,
+    path: &str,
+    value: &str,
+    catalog: &[String],
+    kind: &str,
+) {
     if !catalog.iter().any(|item| item == value) {
         errors.push(format!(
             "{path}: '{value}' is not a SoRLa {kind} (catalog: {})",
@@ -32,15 +38,51 @@ pub fn validate_capability_answers(
                 Ok(answers) => answers,
                 Err(err) => return Err(vec![format!("answers shape invalid: {err}")]),
             };
-            check_membership(&mut errors, "source_event", &answers.source_event, &sorla.events, "event");
-            check_membership(&mut errors, "expected_record", &answers.expected_record, &sorla.records, "record");
-            check_membership(&mut errors, "settlement_record", &answers.settlement_record, &sorla.records, "record");
-            check_membership(&mut errors, "exception_record", &answers.exception_record, &sorla.records, "record");
+            check_membership(
+                &mut errors,
+                "source_event",
+                &answers.source_event,
+                &sorla.events,
+                "event",
+            );
+            check_membership(
+                &mut errors,
+                "expected_record",
+                &answers.expected_record,
+                &sorla.records,
+                "record",
+            );
+            check_membership(
+                &mut errors,
+                "settlement_record",
+                &answers.settlement_record,
+                &sorla.records,
+                "record",
+            );
+            check_membership(
+                &mut errors,
+                "exception_record",
+                &answers.exception_record,
+                &sorla.records,
+                "record",
+            );
             for (operation, action) in &answers.actions {
-                check_membership(&mut errors, &format!("actions.{operation}"), action, &sorla.actions, "action");
+                check_membership(
+                    &mut errors,
+                    &format!("actions.{operation}"),
+                    action,
+                    &sorla.actions,
+                    "action",
+                );
             }
             for (operation, endpoint) in &answers.agent_endpoints {
-                check_membership(&mut errors, &format!("agent_endpoints.{operation}"), endpoint, &sorla.agent_endpoints, "agent endpoint");
+                check_membership(
+                    &mut errors,
+                    &format!("agent_endpoints.{operation}"),
+                    endpoint,
+                    &sorla.agent_endpoints,
+                    "agent endpoint",
+                );
             }
         }
         EXTENSION_BULK_INGEST => {
@@ -49,21 +91,37 @@ pub fn validate_capability_answers(
                 Err(err) => return Err(vec![format!("answers shape invalid: {err}")]),
             };
             for (collection, record) in &answers.record_collections {
-                check_membership(&mut errors, &format!("record_collections.{collection}"), record, &sorla.records, "record");
+                check_membership(
+                    &mut errors,
+                    &format!("record_collections.{collection}"),
+                    record,
+                    &sorla.records,
+                    "record",
+                );
             }
             for (operation, action) in &answers.actions {
-                check_membership(&mut errors, &format!("actions.{operation}"), action, &sorla.actions, "action");
+                check_membership(
+                    &mut errors,
+                    &format!("actions.{operation}"),
+                    action,
+                    &sorla.actions,
+                    "action",
+                );
             }
         }
         other => errors.push(format!("unknown extension '{other}'")),
     }
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{load_sorla_contract, SourceKind, SourceRef};
+    use crate::{SourceKind, SourceRef, load_sorla_contract};
 
     fn fixture_sorla() -> SorlaContract {
         load_sorla_contract(&SourceRef {
@@ -86,8 +144,12 @@ mod tests {
     #[test]
     fn valid_reconciliation_bindings_pass() {
         let sorla = fixture_sorla();
-        validate_capability_answers(EXTENSION_RECONCILIATION, &valid_reconciliation_value(), &sorla)
-            .expect("fixture bindings validate");
+        validate_capability_answers(
+            EXTENSION_RECONCILIATION,
+            &valid_reconciliation_value(),
+            &sorla,
+        )
+        .expect("fixture bindings validate");
     }
 
     #[test]
@@ -95,9 +157,12 @@ mod tests {
         let sorla = fixture_sorla();
         let mut value = valid_reconciliation_value();
         value["source_event"] = Value::String("ImaginaryEvent".into());
-        let errors = validate_capability_answers(EXTENSION_RECONCILIATION, &value, &sorla).unwrap_err();
+        let errors =
+            validate_capability_answers(EXTENSION_RECONCILIATION, &value, &sorla).unwrap_err();
         assert!(
-            errors.iter().any(|e| e.contains("source_event") && e.contains("ImaginaryEvent")),
+            errors
+                .iter()
+                .any(|e| e.contains("source_event") && e.contains("ImaginaryEvent")),
             "got: {errors:?}"
         );
     }
@@ -107,8 +172,12 @@ mod tests {
         let sorla = fixture_sorla();
         let mut value = valid_reconciliation_value();
         value["actions"]["create_settlement"] = Value::String("not_an_action".into());
-        let errors = validate_capability_answers(EXTENSION_RECONCILIATION, &value, &sorla).unwrap_err();
-        assert!(errors.iter().any(|e| e.contains("not_an_action")), "got: {errors:?}");
+        let errors =
+            validate_capability_answers(EXTENSION_RECONCILIATION, &value, &sorla).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("not_an_action")),
+            "got: {errors:?}"
+        );
     }
 
     #[test]
@@ -126,7 +195,8 @@ mod tests {
     #[test]
     fn unknown_extension_is_rejected() {
         let sorla = fixture_sorla();
-        let errors = validate_capability_answers("greentic.operala.nope.v1", &Value::Null, &sorla).unwrap_err();
+        let errors = validate_capability_answers("greentic.operala.nope.v1", &Value::Null, &sorla)
+            .unwrap_err();
         assert!(errors[0].contains("unknown extension"), "got: {errors:?}");
     }
 }

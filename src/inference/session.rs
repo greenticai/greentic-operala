@@ -86,7 +86,8 @@ pub fn emit_answers_tool(schema: Value) -> ToolDef {
 pub fn follow_up_tool() -> ToolDef {
     ToolDef {
         name: "follow_up".into(),
-        description: "Ask the user one clarifying question when the intent or a binding is ambiguous.".into(),
+        description:
+            "Ask the user one clarifying question when the intent or a binding is ambiguous.".into(),
         schema: serde_json::json!({
             "type": "object",
             "required": ["question"],
@@ -192,10 +193,15 @@ mod tests {
 
     #[test]
     fn emit_answers_tool_call_parses_to_answers() {
-        let outcome =
-            parse_outcome(&tool_response("emit_answers", serde_json::json!({"name": "x"})))
-                .unwrap();
-        assert_eq!(outcome, InferenceOutcome::Answers(serde_json::json!({"name": "x"})));
+        let outcome = parse_outcome(&tool_response(
+            "emit_answers",
+            serde_json::json!({"name": "x"}),
+        ))
+        .unwrap();
+        assert_eq!(
+            outcome,
+            InferenceOutcome::Answers(serde_json::json!({"name": "x"}))
+        );
     }
 
     #[test]
@@ -210,8 +216,12 @@ mod tests {
 
     #[test]
     fn json_content_emit_answers_parses() {
-        let outcome = parse_outcome(&text_response(r#"{"emit_answers": {"name": "from_json"}}"#)).unwrap();
-        assert_eq!(outcome, InferenceOutcome::Answers(serde_json::json!({"name": "from_json"})));
+        let outcome =
+            parse_outcome(&text_response(r#"{"emit_answers": {"name": "from_json"}}"#)).unwrap();
+        assert_eq!(
+            outcome,
+            InferenceOutcome::Answers(serde_json::json!({"name": "from_json"}))
+        );
     }
 
     #[test]
@@ -226,18 +236,23 @@ mod tests {
             "```json\n{\"emit_answers\": {\"name\": \"fenced\"}}\n```",
         ))
         .unwrap();
-        assert_eq!(outcome, InferenceOutcome::Answers(serde_json::json!({"name": "fenced"})));
+        assert_eq!(
+            outcome,
+            InferenceOutcome::Answers(serde_json::json!({"name": "fenced"}))
+        );
     }
 
     #[test]
     fn garbage_content_is_a_parse_error() {
-        let err = parse_outcome(&text_response("I think you should use BankTransaction")).unwrap_err();
+        let err =
+            parse_outcome(&text_response("I think you should use BankTransaction")).unwrap_err();
         assert!(err.contains("emit_answers"), "got: {err}");
     }
 
     #[test]
     fn unknown_tool_is_a_parse_error() {
-        let err = parse_outcome(&tool_response("delete_everything", serde_json::json!({}))).unwrap_err();
+        let err =
+            parse_outcome(&tool_response("delete_everything", serde_json::json!({}))).unwrap_err();
         assert!(err.contains("delete_everything"), "got: {err}");
     }
 

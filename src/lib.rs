@@ -2778,7 +2778,10 @@ mod tests {
         let OperalaCommand::Prompt(args) = cli.command else {
             panic!("expected prompt command");
         };
-        assert_eq!(args.llm_provider, Some(greentic_llm::ProviderKind::Anthropic));
+        assert_eq!(
+            args.llm_provider,
+            Some(greentic_llm::ProviderKind::Anthropic)
+        );
         assert_eq!(args.llm_model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(
             args.existing.as_deref(),
@@ -2799,9 +2802,18 @@ mod tests {
             .filter_map(|v| v.as_str())
             .collect();
         for field in [
-            "name", "source_event", "expected_record", "settlement_record",
-            "exception_record", "input_modes", "source_fields", "expected_fields",
-            "matching", "exception_policy", "actions", "agent_endpoints",
+            "name",
+            "source_event",
+            "expected_record",
+            "settlement_record",
+            "exception_record",
+            "input_modes",
+            "source_fields",
+            "expected_fields",
+            "matching",
+            "exception_policy",
+            "actions",
+            "agent_endpoints",
         ] {
             assert!(required.contains(&field), "missing required field {field}");
         }
@@ -2817,7 +2829,13 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        for field in ["name", "input_modes", "record_collections", "actions", "validation"] {
+        for field in [
+            "name",
+            "input_modes",
+            "record_collections",
+            "actions",
+            "validation",
+        ] {
             assert!(required.contains(&field), "missing required field {field}");
         }
     }

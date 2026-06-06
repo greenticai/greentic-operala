@@ -6,15 +6,15 @@ pub mod catalog;
 pub mod session;
 pub mod validate;
 
-use crate::{follow_up_required, OperalaResult, PromptArgs, SorlaContract};
+use crate::{OperalaResult, PromptArgs, SorlaContract, follow_up_required};
 use greentic_llm::{CredentialSource, EnvCredentialSource, LlmProvider, ProviderKind, RigBackend};
 use serde_json::Value;
 
-use session::{build_request, inference_messages, parse_outcome, InferenceOutcome};
+use session::{InferenceOutcome, build_request, inference_messages, parse_outcome};
 use validate::validate_capability_answers;
 
-/// Maximum number of correction rounds after the first attempt.
-const MAX_LLM_RETRIES: usize = 2;
+/// Total LLM attempts before giving up and surfacing a follow-up question.
+const MAX_ATTEMPTS: usize = 3;
 
 /// Run LLM inference for one extension and gate the result deterministically.
 /// `existing_answers` switches update mode on. Returns the validated
@@ -32,7 +32,7 @@ pub fn infer_capability_answers(
     let mut messages = inference_messages(&catalog, intent, existing_answers);
     let tools_supported = chat.tools_supported();
     let mut last_errors: Vec<String> = Vec::new();
-    for _attempt in 0..=MAX_LLM_RETRIES {
+    for _ in 0..MAX_ATTEMPTS {
         let request = build_request(messages.clone(), answers_schema.clone(), tools_supported);
         let response = chat.chat(request).map_err(|err| {
             format!("LLM request failed: {err}; use --no-llm for the deterministic path")
@@ -69,7 +69,7 @@ pub fn infer_capability_answers(
     }
     Err(follow_up_required(&format!(
         "the LLM could not produce valid bindings after {} attempts ({}); please answer directly",
-        MAX_LLM_RETRIES + 1,
+        MAX_ATTEMPTS,
         last_errors.join("; ")
     )))
 }
@@ -93,9 +93,10 @@ pub fn resolve_llm_request(
     let provider = match args.llm_provider {
         Some(provider) => Some(provider),
         None => match env("GREENTIC_LLM_PROVIDER") {
-            Some(raw) => Some(raw.parse::<ProviderKind>().map_err(|err| {
-                format!("invalid GREENTIC_LLM_PROVIDER: {err}")
-            })?),
+            Some(raw) => Some(
+                raw.parse::<ProviderKind>()
+                    .map_err(|err| format!("invalid GREENTIC_LLM_PROVIDER: {err}"))?,
+            ),
             None => None,
         },
     };
@@ -185,11 +186,12 @@ impl ChatFn for LlmRuntime {
 }
 
 #[cfg(test)]
-pub mod tests_support {
+pub(crate) mod tests_support {
     use super::ChatFn;
     use greentic_llm::mock::{TestLlmProvider, TestLlmProviderBuilder};
     use greentic_llm::{ChatResponse, FinishReason, ToolCall};
 
+    /// Test ChatFn backed by the scripted mock. Sync-only: owns its own current-thread runtime, so it must not be driven from inside an existing tokio runtime.
     pub struct ScriptedChat(TestLlmProvider, tokio::runtime::Runtime);
 
     impl ChatFn for ScriptedChat {
@@ -197,7 +199,8 @@ pub mod tests_support {
             &self,
             request: greentic_llm::ChatRequest,
         ) -> Result<ChatResponse, greentic_llm::LlmError> {
-            self.1.block_on(greentic_llm::LlmProvider::chat(&self.0, request))
+            self.1
+                .block_on(greentic_llm::LlmProvider::chat(&self.0, request))
         }
     }
 
@@ -325,7 +328,10 @@ mod driver_tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(err, "follow-up required: Which event is the payment source?");
+        assert_eq!(
+            err,
+            "follow-up required: Which event is the payment source?"
+        );
     }
 }
 
@@ -355,13 +361,14 @@ mod tests {
 
     #[test]
     fn no_llm_flag_wins_over_everything() {
-        let resolved = resolve_llm_request(&args(Some(ProviderKind::Openai), Some("gpt-4o"), true), &|k| {
-            match k {
+        let resolved = resolve_llm_request(
+            &args(Some(ProviderKind::Openai), Some("gpt-4o"), true),
+            &|k| match k {
                 "GREENTIC_LLM_PROVIDER" => Some("openai".into()),
                 "GREENTIC_LLM_MODEL" => Some("gpt-4o".into()),
                 _ => None,
-            }
-        })
+            },
+        )
         .unwrap();
         assert_eq!(resolved, None);
     }
@@ -377,7 +384,11 @@ mod tests {
     #[test]
     fn flag_beats_env() {
         let resolved = resolve_llm_request(
-            &args(Some(ProviderKind::Anthropic), Some("claude-sonnet-4-6"), false),
+            &args(
+                Some(ProviderKind::Anthropic),
+                Some("claude-sonnet-4-6"),
+                false,
+            ),
             &|k| match k {
                 "GREENTIC_LLM_PROVIDER" => Some("openai".into()),
                 "GREENTIC_LLM_MODEL" => Some("gpt-4o".into()),
