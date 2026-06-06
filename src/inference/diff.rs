@@ -43,6 +43,17 @@ fn walk(path: &str, old: &Value, new: &Value, entries: &mut Vec<DiffEntry>) {
                 }
             }
         }
+        (Value::Number(a), Value::Number(b)) => {
+            // Compare numerically to avoid spurious int-vs-float diffs
+            // (serde_json Value PartialEq is variant-exact: 2.0 != 2).
+            if a.as_f64() != b.as_f64() {
+                entries.push(DiffEntry {
+                    path: path.to_string(),
+                    old: Some(old.clone()),
+                    new: Some(new.clone()),
+                });
+            }
+        }
         (old_value, new_value) => {
             if old_value != new_value {
                 entries.push(DiffEntry {
@@ -132,6 +143,13 @@ mod tests {
     fn identical_documents_have_empty_diff() {
         let doc = serde_json::json!({"a": {"b": 1}});
         assert!(diff_values(&doc, &doc).is_empty());
+    }
+
+    #[test]
+    fn int_vs_float_same_value_is_not_a_diff() {
+        let old = serde_json::json!({"amount_tolerance": 2.0});
+        let new = serde_json::json!({"amount_tolerance": 2});
+        assert!(diff_values(&old, &new).is_empty());
     }
 
     #[test]

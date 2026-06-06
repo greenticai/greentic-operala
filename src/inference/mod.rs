@@ -160,9 +160,14 @@ pub fn update_answers(
             updated.capability_answers.reconciliation =
                 Some(serde_json::from_value(updated_value).map_err(crate::to_string)?);
         }
-        _ => {
+        crate::EXTENSION_BULK_INGEST => {
             updated.capability_answers.bulk_ingest =
                 Some(serde_json::from_value(updated_value).map_err(crate::to_string)?);
+        }
+        other => {
+            return Err(format!(
+                "internal: unhandled capability '{other}' in update_answers"
+            ));
         }
     }
     crate::validate_answers(&updated)?;
