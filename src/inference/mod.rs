@@ -4,9 +4,75 @@
 
 pub mod catalog;
 pub mod session;
+pub mod validate;
 
-use crate::{OperalaResult, PromptArgs};
+use crate::{follow_up_required, OperalaResult, PromptArgs, SorlaContract};
 use greentic_llm::{CredentialSource, EnvCredentialSource, LlmProvider, ProviderKind, RigBackend};
+use serde_json::Value;
+
+use session::{build_request, inference_messages, parse_outcome, InferenceOutcome};
+use validate::validate_capability_answers;
+
+/// Maximum number of correction rounds after the first attempt.
+const MAX_LLM_RETRIES: usize = 2;
+
+/// Run LLM inference for one extension and gate the result deterministically.
+/// `existing_answers` switches update mode on. Returns the validated
+/// capability-answers JSON value, or `Err(follow_up_required(...))` when the
+/// model asks for clarification or exhausts its retries.
+pub fn infer_capability_answers(
+    chat: &dyn ChatFn,
+    extension_id: &str,
+    answers_schema: &Value,
+    sorla: &SorlaContract,
+    intent: &str,
+    existing_answers: Option<&Value>,
+) -> OperalaResult<Value> {
+    let catalog = catalog::sorla_catalog(sorla);
+    let mut messages = inference_messages(&catalog, intent, existing_answers);
+    let tools_supported = chat.tools_supported();
+    let mut last_errors: Vec<String> = Vec::new();
+    for _attempt in 0..=MAX_LLM_RETRIES {
+        let request = build_request(messages.clone(), answers_schema.clone(), tools_supported);
+        let response = chat.chat(request).map_err(|err| {
+            format!("LLM request failed: {err}; use --no-llm for the deterministic path")
+        })?;
+        match parse_outcome(&response) {
+            Ok(InferenceOutcome::FollowUp(question)) => return Err(follow_up_required(&question)),
+            Ok(InferenceOutcome::Answers(value)) => {
+                match validate_capability_answers(extension_id, &value, sorla) {
+                    Ok(()) => return Ok(value),
+                    Err(errors) => {
+                        messages.push(greentic_llm::ChatMessage {
+                            role: greentic_llm::MessageRole::User,
+                            content: format!(
+                                "Your answers failed validation:\n- {}\nEmit a corrected complete answers object via emit_answers, binding only to catalog identifiers.",
+                                errors.join("\n- ")
+                            ),
+                            images: vec![],
+                        });
+                        last_errors = errors;
+                    }
+                }
+            }
+            Err(parse_error) => {
+                messages.push(greentic_llm::ChatMessage {
+                    role: greentic_llm::MessageRole::User,
+                    content: format!(
+                        "{parse_error}\nRespond again using the emit_answers or follow_up tool."
+                    ),
+                    images: vec![],
+                });
+                last_errors = vec![parse_error];
+            }
+        }
+    }
+    Err(follow_up_required(&format!(
+        "the LLM could not produce valid bindings after {} attempts ({}); please answer directly",
+        MAX_LLM_RETRIES + 1,
+        last_errors.join("; ")
+    )))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedLlm {
@@ -115,6 +181,151 @@ impl ChatFn for LlmRuntime {
 
     fn tools_supported(&self) -> bool {
         self.backend.capabilities().tools
+    }
+}
+
+#[cfg(test)]
+pub mod tests_support {
+    use super::ChatFn;
+    use greentic_llm::mock::{TestLlmProvider, TestLlmProviderBuilder};
+    use greentic_llm::{ChatResponse, FinishReason, ToolCall};
+
+    pub struct ScriptedChat(TestLlmProvider, tokio::runtime::Runtime);
+
+    impl ChatFn for ScriptedChat {
+        fn chat(
+            &self,
+            request: greentic_llm::ChatRequest,
+        ) -> Result<ChatResponse, greentic_llm::LlmError> {
+            self.1.block_on(greentic_llm::LlmProvider::chat(&self.0, request))
+        }
+    }
+
+    pub fn scripted_chat(responses: Vec<ChatResponse>) -> ScriptedChat {
+        let mut builder = TestLlmProviderBuilder::new();
+        for response in responses {
+            builder = builder.script_response(response);
+        }
+        ScriptedChat(
+            builder.build(),
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        )
+    }
+
+    pub fn emit(value: serde_json::Value) -> ChatResponse {
+        ChatResponse {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c".into(),
+                name: "emit_answers".into(),
+                arguments: value,
+            }],
+            finish_reason: FinishReason::ToolCalls,
+        }
+    }
+
+    pub fn follow_up(question: &str) -> ChatResponse {
+        ChatResponse {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c".into(),
+                name: "follow_up".into(),
+                arguments: serde_json::json!({ "question": question }),
+            }],
+            finish_reason: FinishReason::ToolCalls,
+        }
+    }
+}
+
+#[cfg(test)]
+mod driver_tests {
+    use super::*;
+    use crate::OperaLaExtension;
+    use tests_support::{emit, follow_up, scripted_chat};
+
+    fn fixture_sorla() -> crate::SorlaContract {
+        crate::load_sorla_contract(&crate::SourceRef {
+            kind: crate::SourceKind::File,
+            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+            digest: None,
+        })
+        .unwrap()
+    }
+
+    fn fixture_reconciliation_value() -> serde_json::Value {
+        let answers: crate::OperalaAnswers = serde_json::from_str(include_str!(
+            "../../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .unwrap();
+        serde_json::to_value(answers.capability_answers.reconciliation.unwrap()).unwrap()
+    }
+
+    #[test]
+    fn driver_accepts_valid_answers_first_try() {
+        let chat = scripted_chat(vec![emit(fixture_reconciliation_value())]);
+        let value = infer_capability_answers(
+            &chat,
+            crate::EXTENSION_RECONCILIATION,
+            &crate::RECONCILIATION_EXTENSION.answers_schema(),
+            &fixture_sorla(),
+            "reconcile rent payments",
+            None,
+        )
+        .expect("inference succeeds");
+        assert_eq!(value["source_event"], "BankTransaction");
+    }
+
+    #[test]
+    fn driver_retries_on_hallucinated_binding_then_succeeds() {
+        let mut bad = fixture_reconciliation_value();
+        bad["source_event"] = serde_json::Value::String("ImaginaryEvent".into());
+        let chat = scripted_chat(vec![emit(bad), emit(fixture_reconciliation_value())]);
+        let value = infer_capability_answers(
+            &chat,
+            crate::EXTENSION_RECONCILIATION,
+            &crate::RECONCILIATION_EXTENSION.answers_schema(),
+            &fixture_sorla(),
+            "reconcile rent payments",
+            None,
+        )
+        .expect("retry succeeds");
+        assert_eq!(value["source_event"], "BankTransaction");
+    }
+
+    #[test]
+    fn driver_exhausts_retries_into_follow_up() {
+        let mut bad = fixture_reconciliation_value();
+        bad["source_event"] = serde_json::Value::String("ImaginaryEvent".into());
+        let chat = scripted_chat(vec![emit(bad.clone()), emit(bad.clone()), emit(bad)]);
+        let err = infer_capability_answers(
+            &chat,
+            crate::EXTENSION_RECONCILIATION,
+            &crate::RECONCILIATION_EXTENSION.answers_schema(),
+            &fixture_sorla(),
+            "reconcile rent payments",
+            None,
+        )
+        .unwrap_err();
+        assert!(err.starts_with("follow-up required:"), "got: {err}");
+        assert!(err.contains("ImaginaryEvent"), "got: {err}");
+    }
+
+    #[test]
+    fn driver_surfaces_follow_up_immediately() {
+        let chat = scripted_chat(vec![follow_up("Which event is the payment source?")]);
+        let err = infer_capability_answers(
+            &chat,
+            crate::EXTENSION_RECONCILIATION,
+            &crate::RECONCILIATION_EXTENSION.answers_schema(),
+            &fixture_sorla(),
+            "do something",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err, "follow-up required: Which event is the payment source?");
     }
 }
 
