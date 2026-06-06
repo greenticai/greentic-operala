@@ -327,6 +327,10 @@ pub trait OperaLaExtension {
     fn capability(&self) -> &'static str;
     fn version(&self) -> &'static str;
     fn qa_schema(&self) -> Value;
+    /// JSON Schema for this extension's capability answers object. Handed to
+    /// the LLM as the `emit_answers` tool schema. Guidance for the model —
+    /// deterministic validation happens separately via serde + binding checks.
+    fn answers_schema(&self) -> Value;
     fn analyse_sorla(
         &self,
         sorla: &SorlaContract,
@@ -441,6 +445,41 @@ impl OperaLaExtension for ReconciliationExtension {
 
     fn qa_schema(&self) -> Value {
         self.qa_schema_for_locale("en-GB")
+    }
+
+    fn answers_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "name", "source_event", "expected_record", "settlement_record",
+                "exception_record", "input_modes", "source_fields", "expected_fields",
+                "matching", "exception_policy", "actions", "agent_endpoints"
+            ],
+            "properties": {
+                "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "source_event": { "type": "string", "description": "A SoRLa event id from catalog.events — the incoming observed payment event." },
+                "expected_record": { "type": "string", "description": "A SoRLa record id from catalog.records — the expected obligation/invoice." },
+                "settlement_record": { "type": "string", "description": "A SoRLa record id from catalog.records — stores the settled payment." },
+                "exception_record": { "type": "string", "description": "A SoRLa record id from catalog.records — stores exceptions for manual review." },
+                "input_modes": { "type": "array", "items": { "enum": ["single", "batch"] }, "minItems": 1 },
+                "source_fields": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "expected_fields": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "matching": {
+                    "type": "object",
+                    "required": ["amount_tolerance", "date_window_days", "auto_match_threshold", "review_threshold"],
+                    "properties": {
+                        "amount_tolerance": { "type": "number", "minimum": 0 },
+                        "date_window_days": { "type": "integer", "minimum": 0 },
+                        "auto_match_threshold": { "type": "integer", "minimum": 0, "maximum": 100 },
+                        "review_threshold": { "type": "integer", "minimum": 0, "maximum": 100 }
+                    }
+                },
+                "exception_policy": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "actions": { "type": "object", "description": "operation → SoRLa action id from catalog.actions", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "agent_endpoints": { "type": "object", "description": "operation → SoRLa agent endpoint id from catalog.agent_endpoints", "additionalProperties": { "type": "string", "minLength": 1 } }
+            }
+        })
     }
 
     fn analyse_sorla(
@@ -2747,5 +2786,39 @@ mod tests {
         );
         assert!(args.in_place);
         assert!(!args.no_llm);
+    }
+
+    #[test]
+    fn reconciliation_answers_schema_round_trips_the_fixture() {
+        let schema = RECONCILIATION_EXTENSION.answers_schema();
+        assert_eq!(schema["type"], "object");
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for field in [
+            "name", "source_event", "expected_record", "settlement_record",
+            "exception_record", "input_modes", "source_fields", "expected_fields",
+            "matching", "exception_policy", "actions", "agent_endpoints",
+        ] {
+            assert!(required.contains(&field), "missing required field {field}");
+        }
+    }
+
+    #[test]
+    fn bulk_ingest_answers_schema_has_required_fields() {
+        let schema = BULK_INGEST_EXTENSION.answers_schema();
+        assert_eq!(schema["type"], "object");
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for field in ["name", "input_modes", "record_collections", "actions", "validation"] {
+            assert!(required.contains(&field), "missing required field {field}");
+        }
     }
 }
