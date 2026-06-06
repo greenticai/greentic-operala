@@ -3,6 +3,7 @@
 //! `lib.rs`; this module is only entered when an LLM is configured.
 
 pub mod catalog;
+pub mod session;
 
 use crate::{OperalaResult, PromptArgs};
 use greentic_llm::{CredentialSource, EnvCredentialSource, LlmProvider, ProviderKind, RigBackend};
