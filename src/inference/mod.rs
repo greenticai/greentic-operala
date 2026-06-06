@@ -3,7 +3,7 @@
 //! `lib.rs`; this module is only entered when an LLM is configured.
 
 use crate::{OperalaResult, PromptArgs};
-use greentic_llm::ProviderKind;
+use greentic_llm::{CredentialSource, EnvCredentialSource, LlmProvider, ProviderKind, RigBackend};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedLlm {
@@ -53,10 +53,71 @@ pub fn resolve_llm_request_from_process_env(
     resolve_llm_request(args, &|key| std::env::var(key).ok())
 }
 
+/// Owns the tokio runtime + provider backend for one CLI invocation.
+/// Operala is a sync binary; all async crate calls are `block_on`'d here.
+pub struct LlmRuntime {
+    runtime: tokio::runtime::Runtime,
+    backend: RigBackend,
+}
+
+impl LlmRuntime {
+    pub fn build(resolved: &ResolvedLlm) -> OperalaResult<Self> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| format!("failed to start async runtime: {err}"))?;
+        let credential = runtime
+            .block_on(EnvCredentialSource.get_credential(resolved.provider))
+            .map_err(|err| {
+                format!(
+                    "LLM credential error for '{}': {err}; set GREENTIC_LLM_PROVIDER and GREENTIC_LLM_API_KEY",
+                    resolved.provider.as_str()
+                )
+            })?;
+        let backend = RigBackend::new(resolved.provider, &resolved.model, &credential)
+            .map_err(|err| format!("failed to initialise LLM backend: {err}"))?;
+        Ok(Self { runtime, backend })
+    }
+
+    pub fn chat(
+        &self,
+        request: greentic_llm::ChatRequest,
+    ) -> Result<greentic_llm::ChatResponse, greentic_llm::LlmError> {
+        self.runtime.block_on(self.backend.chat(request))
+    }
+}
+
+/// Test seam: session functions take `&dyn ChatFn` so tests inject the
+/// scripted mock without a real backend or runtime.
+pub trait ChatFn {
+    fn chat(
+        &self,
+        request: greentic_llm::ChatRequest,
+    ) -> Result<greentic_llm::ChatResponse, greentic_llm::LlmError>;
+
+    /// Whether the underlying provider supports native tool calling.
+    /// Defaults to true; `LlmRuntime` reports the real capability.
+    fn tools_supported(&self) -> bool {
+        true
+    }
+}
+
+impl ChatFn for LlmRuntime {
+    fn chat(
+        &self,
+        request: greentic_llm::ChatRequest,
+    ) -> Result<greentic_llm::ChatResponse, greentic_llm::LlmError> {
+        LlmRuntime::chat(self, request)
+    }
+
+    fn tools_supported(&self) -> bool {
+        self.backend.capabilities().tools
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn args(provider: Option<ProviderKind>, model: Option<&str>, no_llm: bool) -> PromptArgs {
         PromptArgs {
@@ -144,5 +205,29 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.contains("GREENTIC_LLM_PROVIDER"), "got: {err}");
+    }
+
+    #[test]
+    fn build_backend_without_api_key_is_a_clear_error() {
+        // GREENTIC_LLM_API_KEY deliberately not set for provider "openai" in
+        // this resolver run; EnvCredentialSource (real env) will miss unless
+        // the outer environment leaks one — guard against that by checking
+        // both outcomes explicitly.
+        let resolved = ResolvedLlm {
+            provider: ProviderKind::Openai,
+            model: "gpt-4o".into(),
+        };
+        match LlmRuntime::build(&resolved) {
+            Err(err) => {
+                assert!(err.contains("GREENTIC_LLM_API_KEY"), "got: {err}");
+            }
+            Ok(_) => {
+                // Only reachable when the developer machine has real env vars set.
+                assert_eq!(
+                    std::env::var("GREENTIC_LLM_PROVIDER").as_deref(),
+                    Ok("openai")
+                );
+            }
+        }
     }
 }
