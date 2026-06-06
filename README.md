@@ -67,6 +67,32 @@ The main outputs are:
 - `target/operala/tenancy_rent_reconciliation/operala.build.lock`
 - `target/operala/tenancy_rent_reconciliation/tenancy-rent-reconciliation.gtpack`
 
+## LLM-backed prompting
+
+`prompt` uses an LLM to infer answers when one is configured; otherwise it falls back to the deterministic keyword path (a one-line `note:` on stderr).
+
+```bash
+# Configure a provider (any greentic-llm provider: openai, anthropic, ollama, groq, ...)
+export GREENTIC_LLM_PROVIDER=anthropic
+export GREENTIC_LLM_API_KEY=sk-...
+export GREENTIC_LLM_MODEL=claude-sonnet-4-6
+
+# New definition
+greentic-operala prompt --sorla sorla.yaml \
+  "Set up rent payment reconciliation from bank transactions"
+
+# Update an existing definition (requires an LLM)
+greentic-operala prompt --sorla sorla.yaml \
+  --existing answers.json \
+  "raise the amount tolerance to 5"
+# → prints a field-level diff, writes answers.updated.json (--in-place to overwrite)
+
+# Force the deterministic path
+greentic-operala prompt --no-llm --sorla sorla.yaml "..."
+```
+
+Flags `--llm-provider` / `--llm-model` override the env vars. The LLM binds only to identifiers present in the SoRLa contract — every output passes a deterministic validation gate, and ambiguity surfaces as the same `follow-up required:` errors as the keyword path. Provider support comes from the [`greentic-llm`](https://github.com/greenticai/greentic-llm) crate.
+
 ## Run With OperaX
 
 After `greentic-operax` is installed on `PATH`, dry-run the generated pack:
