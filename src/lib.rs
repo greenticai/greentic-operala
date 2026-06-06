@@ -772,7 +772,22 @@ pub fn run_operala_cli() -> std::process::ExitCode {
 pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
     match cli.command {
         OperalaCommand::Prompt(args) => {
-            let answers = prompt_answers(&args)?;
+            let resolved = inference::resolve_llm_request_from_process_env(&args)?;
+            let llm_runtime = match &resolved {
+                Some(resolved) => Some(inference::LlmRuntime::build(resolved)?),
+                None => {
+                    if !args.no_llm {
+                        eprintln!(
+                            "greentic-operala: no LLM configured (set GREENTIC_LLM_PROVIDER/GREENTIC_LLM_MODEL or pass --llm-provider/--llm-model); using the deterministic keyword path"
+                        );
+                    }
+                    None
+                }
+            };
+            let llm_ref = llm_runtime
+                .as_ref()
+                .map(|runtime| runtime as &dyn inference::ChatFn);
+            let answers = prompt_answers_with_llm(&args, llm_ref)?;
             let output = args
                 .output
                 .clone()
@@ -809,46 +824,77 @@ pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
 }
 
 pub fn prompt_answers(args: &PromptArgs) -> OperalaResult<OperalaAnswers> {
+    prompt_answers_with_llm(args, None)
+}
+
+pub fn prompt_answers_with_llm(
+    args: &PromptArgs,
+    llm: Option<&dyn inference::ChatFn>,
+) -> OperalaResult<OperalaAnswers> {
     let sorla = load_sorla_contract(&SourceRef {
         kind: SourceKind::File,
         uri: args.sorla.clone(),
         digest: None,
     })?;
-    let lower_prompt = args.prompt.to_ascii_lowercase();
-    let capability = if lower_prompt.contains("bulk ingest")
-        || lower_prompt.contains("bulk upload")
-        || lower_prompt.contains("batch upload")
-        || lower_prompt.contains("upload operation")
-    {
-        "bulk_ingest"
-    } else if lower_prompt.contains("reconcil")
-        || lower_prompt.contains("bank transaction")
-        || lower_prompt.contains("rent payment")
-        || lower_prompt.contains("invoice payment")
-    {
-        "reconciliation"
-    } else {
-        return Err(follow_up_required(
-            "Which operational capability should OperaLa author for this SoRLa contract?",
-        ));
-    };
+    let capability = detect_capability(&args.prompt, llm, &sorla)?;
 
-    let (extension, reconciliation, bulk_ingest, output_name) = if capability == "bulk_ingest" {
-        let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
-        (
-            EXTENSION_BULK_INGEST.to_string(),
-            None,
-            Some(bulk.clone()),
-            bulk.name.clone(),
-        )
-    } else {
-        let reconciliation = infer_reconciliation_answers(&sorla)?;
-        (
-            EXTENSION_RECONCILIATION.to_string(),
-            Some(reconciliation.clone()),
-            None,
-            reconciliation.name.clone(),
-        )
+    let (extension, reconciliation, bulk_ingest, output_name) = match (capability, llm) {
+        ("reconciliation", Some(chat)) => {
+            let value = inference::infer_capability_answers(
+                chat,
+                EXTENSION_RECONCILIATION,
+                &RECONCILIATION_EXTENSION.answers_schema(),
+                &sorla,
+                &args.prompt,
+                None,
+            )?;
+            let reconciliation: ReconciliationAnswers =
+                serde_json::from_value(value).map_err(to_string)?;
+            (
+                EXTENSION_RECONCILIATION.to_string(),
+                Some(reconciliation.clone()),
+                None,
+                reconciliation.name.clone(),
+            )
+        }
+        ("bulk_ingest", Some(chat)) => {
+            let value = inference::infer_capability_answers(
+                chat,
+                EXTENSION_BULK_INGEST,
+                &BULK_INGEST_EXTENSION.answers_schema(),
+                &sorla,
+                &args.prompt,
+                None,
+            )?;
+            let bulk: BulkIngestAnswers = serde_json::from_value(value).map_err(to_string)?;
+            (
+                EXTENSION_BULK_INGEST.to_string(),
+                None,
+                Some(bulk.clone()),
+                bulk.name.clone(),
+            )
+        }
+        ("bulk_ingest", None) => {
+            let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
+            (
+                EXTENSION_BULK_INGEST.to_string(),
+                None,
+                Some(bulk.clone()),
+                bulk.name.clone(),
+            )
+        }
+        (_, None) => {
+            let reconciliation = infer_reconciliation_answers(&sorla)?;
+            (
+                EXTENSION_RECONCILIATION.to_string(),
+                Some(reconciliation.clone()),
+                None,
+                reconciliation.name.clone(),
+            )
+        }
+        (other, Some(_)) => {
+            return Err(format!("unsupported capability '{other}'"));
+        }
     };
     let work_dir = PathBuf::from(format!("target/operala/{output_name}"));
     let gtpack_file_name = format!("{}.gtpack", output_name.replace('_', "-"));
@@ -883,6 +929,44 @@ pub fn prompt_answers(args: &PromptArgs) -> OperalaResult<OperalaAnswers> {
         },
         assumptions: Vec::new(),
     })
+}
+
+fn detect_capability(
+    prompt: &str,
+    llm: Option<&dyn inference::ChatFn>,
+    sorla: &SorlaContract,
+) -> OperalaResult<&'static str> {
+    let lower_prompt = prompt.to_ascii_lowercase();
+    if lower_prompt.contains("bulk ingest")
+        || lower_prompt.contains("bulk upload")
+        || lower_prompt.contains("batch upload")
+        || lower_prompt.contains("upload operation")
+    {
+        return Ok("bulk_ingest");
+    }
+    if lower_prompt.contains("reconcil")
+        || lower_prompt.contains("bank transaction")
+        || lower_prompt.contains("rent payment")
+        || lower_prompt.contains("invoice payment")
+    {
+        return Ok("reconciliation");
+    }
+    if let Some(chat) = llm
+        && let Some(capability) = inference::classify_capability(chat, prompt, sorla)?
+    {
+        return Ok(match capability.as_str() {
+            "reconciliation" => "reconciliation",
+            "bulk_ingest" => "bulk_ingest",
+            _ => {
+                return Err(follow_up_required(
+                    "Which operational capability should OperaLa author for this SoRLa contract?",
+                ));
+            }
+        });
+    }
+    Err(follow_up_required(
+        "Which operational capability should OperaLa author for this SoRLa contract?",
+    ))
 }
 
 pub fn wizard_schema(locale: Option<&str>) -> Value {
@@ -2838,5 +2922,67 @@ mod tests {
         ] {
             assert!(required.contains(&field), "missing required field {field}");
         }
+    }
+
+    #[test]
+    fn llm_backed_prompt_produces_validated_answers() {
+        let answers_value: serde_json::Value = {
+            let fixture: OperalaAnswers = serde_json::from_str(include_str!(
+                "../extensions/reconciliation/examples/tenancy/answers.json"
+            ))
+            .unwrap();
+            serde_json::to_value(fixture.capability_answers.reconciliation.unwrap()).unwrap()
+        };
+        let chat = inference::tests_support::scripted_chat(vec![inference::tests_support::emit(
+            answers_value,
+        )]);
+        let answers = prompt_answers_with_llm(
+            &PromptArgs {
+                sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+                locale: Some("en-GB".into()),
+                output: None,
+                tenant: Some("acme-property".into()),
+                team: None,
+                llm_provider: None,
+                llm_model: None,
+                no_llm: false,
+                existing: None,
+                in_place: false,
+                prompt: "Set up rent payment reconciliation from bank transactions".into(),
+            },
+            Some(&chat),
+        )
+        .expect("llm prompt produces answers");
+        assert_eq!(answers.extension, EXTENSION_RECONCILIATION);
+        let reconciliation = answers
+            .capability_answers
+            .reconciliation
+            .as_ref()
+            .expect("nested");
+        assert_eq!(reconciliation.source_event, "BankTransaction");
+        validate_answers(&answers).expect("llm answers validate");
+    }
+
+    #[test]
+    fn no_llm_path_is_byte_identical_to_legacy_keyword_path() {
+        let args = PromptArgs {
+            sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+            locale: Some("en-GB".into()),
+            output: None,
+            tenant: Some("acme-property".into()),
+            team: Some("property-ops".into()),
+            llm_provider: None,
+            llm_model: None,
+            no_llm: true,
+            existing: None,
+            in_place: false,
+            prompt: "Set up rent payment reconciliation from bank transactions".into(),
+        };
+        let via_wrapper = prompt_answers(&args).expect("wrapper works");
+        let via_llm_none = prompt_answers_with_llm(&args, None).expect("explicit none works");
+        assert_eq!(
+            serde_json::to_string(&via_wrapper).unwrap(),
+            serde_json::to_string(&via_llm_none).unwrap()
+        );
     }
 }

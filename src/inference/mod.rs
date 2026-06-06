@@ -74,6 +74,41 @@ pub fn infer_capability_answers(
     )))
 }
 
+/// One-shot capability classification for prompts the keyword fast-path could
+/// not place. Returns None for "unknown".
+pub fn classify_capability(
+    chat: &dyn ChatFn,
+    intent: &str,
+    sorla: &SorlaContract,
+) -> OperalaResult<Option<String>> {
+    let catalog = catalog::sorla_catalog(sorla);
+    let request = greentic_llm::ChatRequest {
+        messages: vec![
+            greentic_llm::ChatMessage {
+                role: greentic_llm::MessageRole::System,
+                content: "Classify the operator intent into one operational capability. Respond with ONLY a JSON object: {\"capability\": \"reconciliation\"} or {\"capability\": \"bulk_ingest\"} or {\"capability\": \"unknown\"}.".into(),
+                images: vec![],
+            },
+            greentic_llm::ChatMessage {
+                role: greentic_llm::MessageRole::User,
+                content: format!(
+                    "SoRLa catalog:\n{}\n\nOperator intent: {intent}",
+                    serde_json::to_string_pretty(&catalog).unwrap_or_default()
+                ),
+                images: vec![],
+            },
+        ],
+        tools: vec![],
+        tool_choice: None,
+        max_tokens: Some(64),
+        temperature: Some(0.0),
+    };
+    let response = chat
+        .chat(request)
+        .map_err(|err| format!("LLM classification failed: {err}"))?;
+    session::parse_classification(&response)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedLlm {
     pub provider: ProviderKind,
