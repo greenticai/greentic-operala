@@ -137,6 +137,21 @@ pub struct PromptArgs {
     pub tenant: Option<String>,
     #[arg(long)]
     pub team: Option<String>,
+    /// LLM provider for inference (overrides GREENTIC_LLM_PROVIDER).
+    #[arg(long, value_enum)]
+    pub llm_provider: Option<greentic_llm::ProviderKind>,
+    /// LLM model id (overrides GREENTIC_LLM_MODEL).
+    #[arg(long)]
+    pub llm_model: Option<String>,
+    /// Force the deterministic keyword path even when an LLM is configured.
+    #[arg(long, default_value_t = false)]
+    pub no_llm: bool,
+    /// Existing answers.json to update (update mode; requires an LLM).
+    #[arg(long)]
+    pub existing: Option<PathBuf>,
+    /// Overwrite --existing in place instead of writing answers.updated.json.
+    #[arg(long, default_value_t = false)]
+    pub in_place: bool,
     pub prompt: String,
 }
 
@@ -2360,6 +2375,11 @@ mod tests {
             team: Some("property-ops".to_string()),
             locale: Some("en-GB".to_string()),
             output: None,
+            llm_provider: None,
+            llm_model: None,
+            no_llm: false,
+            existing: None,
+            in_place: false,
             prompt: "Set up rent payment reconciliation from bank transactions".to_string(),
         })
         .expect("prompt produces answers");
@@ -2398,6 +2418,11 @@ mod tests {
             team: None,
             locale: None,
             output: None,
+            llm_provider: None,
+            llm_model: None,
+            no_llm: false,
+            existing: None,
+            in_place: false,
             prompt: "Help my operations team with something".to_string(),
         })
         .expect_err("unclear prompt should need follow-up");
@@ -2443,6 +2468,11 @@ mod tests {
             team: Some("finance".to_string()),
             locale: Some("en-GB".to_string()),
             output: None,
+            llm_provider: None,
+            llm_model: None,
+            no_llm: false,
+            existing: None,
+            in_place: false,
             prompt: "Create a generic bulk upload operation from a JSON batch file with exactly 3 tenants, 3 tenancies, and 6 payments.".to_string(),
         })
         .expect("bulk upload prompt produces answers");
@@ -2685,5 +2715,35 @@ mod tests {
         answers.locale = Some("nl-NL".to_string());
         let err = run_wizard(&answers).expect_err("unknown extension should fail");
         assert!(err.contains("Onbekende OperaLa-extensie"));
+    }
+
+    #[test]
+    fn prompt_args_parse_llm_flags() {
+        use clap::Parser;
+        let cli = OperalaCli::parse_from([
+            "greentic-operala",
+            "prompt",
+            "--sorla",
+            "s.yaml",
+            "--llm-provider",
+            "anthropic",
+            "--llm-model",
+            "claude-sonnet-4-6",
+            "--existing",
+            "old-answers.json",
+            "--in-place",
+            "update the tolerance",
+        ]);
+        let OperalaCommand::Prompt(args) = cli.command else {
+            panic!("expected prompt command");
+        };
+        assert_eq!(args.llm_provider, Some(greentic_llm::ProviderKind::Anthropic));
+        assert_eq!(args.llm_model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(
+            args.existing.as_deref(),
+            Some(std::path::Path::new("old-answers.json"))
+        );
+        assert!(args.in_place);
+        assert!(!args.no_llm);
     }
 }
