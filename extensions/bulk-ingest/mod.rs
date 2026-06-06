@@ -47,6 +47,31 @@ impl OperaLaExtension for BulkIngestExtension {
         })
     }
 
+    fn answers_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "input_modes", "record_collections", "actions", "validation"],
+            "properties": {
+                "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "input_modes": { "type": "array", "items": { "enum": ["batch"] }, "minItems": 1 },
+                "record_collections": { "type": "object", "description": "collection name → SoRLa record id from catalog.records", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "actions": { "type": "object", "description": "operation name → SoRLa action id from catalog.actions", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "expected_counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+                "validation": {
+                    "type": "object",
+                    "required": ["atomic", "dry_run", "require_unique_ids", "validate_references"],
+                    "properties": {
+                        "atomic": { "type": "boolean" },
+                        "dry_run": { "type": "boolean" },
+                        "require_unique_ids": { "type": "boolean" },
+                        "validate_references": { "type": "boolean" }
+                    }
+                }
+            }
+        })
+    }
+
     fn analyse_sorla(
         &self,
         sorla: &SorlaContract,

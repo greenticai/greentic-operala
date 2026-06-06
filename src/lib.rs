@@ -19,6 +19,8 @@ mod embedded_i18n {
     include!(concat!(env!("OUT_DIR"), "/embedded_i18n.rs"));
 }
 
+pub mod inference;
+
 pub type OperalaResult<T> = Result<T, String>;
 
 pub const ANSWERS_SCHEMA: &str = "greentic.operala.answers.v1";
@@ -137,6 +139,21 @@ pub struct PromptArgs {
     pub tenant: Option<String>,
     #[arg(long)]
     pub team: Option<String>,
+    /// LLM provider for inference (overrides GREENTIC_LLM_PROVIDER).
+    #[arg(long, value_enum)]
+    pub llm_provider: Option<greentic_llm::ProviderKind>,
+    /// LLM model id (overrides GREENTIC_LLM_MODEL).
+    #[arg(long)]
+    pub llm_model: Option<String>,
+    /// Force the deterministic keyword path even when an LLM is configured.
+    #[arg(long, default_value_t = false)]
+    pub no_llm: bool,
+    /// Existing answers.json to update (update mode; requires an LLM).
+    #[arg(long)]
+    pub existing: Option<PathBuf>,
+    /// Overwrite --existing in place instead of writing answers.updated.json.
+    #[arg(long, default_value_t = false)]
+    pub in_place: bool,
     pub prompt: String,
 }
 
@@ -310,6 +327,10 @@ pub trait OperaLaExtension {
     fn capability(&self) -> &'static str;
     fn version(&self) -> &'static str;
     fn qa_schema(&self) -> Value;
+    /// JSON Schema for this extension's capability answers object. Handed to
+    /// the LLM as the `emit_answers` tool schema. Guidance for the model —
+    /// deterministic validation happens separately via serde + binding checks.
+    fn answers_schema(&self) -> Value;
     fn analyse_sorla(
         &self,
         sorla: &SorlaContract,
@@ -424,6 +445,41 @@ impl OperaLaExtension for ReconciliationExtension {
 
     fn qa_schema(&self) -> Value {
         self.qa_schema_for_locale("en-GB")
+    }
+
+    fn answers_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "name", "source_event", "expected_record", "settlement_record",
+                "exception_record", "input_modes", "source_fields", "expected_fields",
+                "matching", "exception_policy", "actions", "agent_endpoints"
+            ],
+            "properties": {
+                "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "source_event": { "type": "string", "description": "A SoRLa event id from catalog.events — the incoming observed payment event." },
+                "expected_record": { "type": "string", "description": "A SoRLa record id from catalog.records — the expected obligation/invoice." },
+                "settlement_record": { "type": "string", "description": "A SoRLa record id from catalog.records — stores the settled payment." },
+                "exception_record": { "type": "string", "description": "A SoRLa record id from catalog.records — stores exceptions for manual review." },
+                "input_modes": { "type": "array", "items": { "enum": ["single", "batch"] }, "minItems": 1 },
+                "source_fields": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "expected_fields": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "matching": {
+                    "type": "object",
+                    "required": ["amount_tolerance", "date_window_days", "auto_match_threshold", "review_threshold"],
+                    "properties": {
+                        "amount_tolerance": { "type": "number", "minimum": 0 },
+                        "date_window_days": { "type": "integer", "minimum": 0 },
+                        "auto_match_threshold": { "type": "integer", "minimum": 0, "maximum": 100 },
+                        "review_threshold": { "type": "integer", "minimum": 0, "maximum": 100 }
+                    }
+                },
+                "exception_policy": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "actions": { "type": "object", "description": "operation → SoRLa action id from catalog.actions", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "agent_endpoints": { "type": "object", "description": "operation → SoRLa agent endpoint id from catalog.agent_endpoints", "additionalProperties": { "type": "string", "minLength": 1 } }
+            }
+        })
     }
 
     fn analyse_sorla(
@@ -716,7 +772,48 @@ pub fn run_operala_cli() -> std::process::ExitCode {
 pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
     match cli.command {
         OperalaCommand::Prompt(args) => {
-            let answers = prompt_answers(&args)?;
+            let resolved = inference::resolve_llm_request_from_process_env(&args)?;
+            let llm_runtime = match &resolved {
+                Some(resolved) => Some(inference::LlmRuntime::build(resolved)?),
+                None => {
+                    if !args.no_llm {
+                        eprintln!(
+                            "greentic-operala: note: no LLM configured; using the deterministic keyword path (set GREENTIC_LLM_PROVIDER/GREENTIC_LLM_MODEL or pass --llm-provider/--llm-model to enable LLM inference)"
+                        );
+                    }
+                    None
+                }
+            };
+            let llm_ref = llm_runtime
+                .as_ref()
+                .map(|runtime| runtime as &dyn inference::ChatFn);
+            if let Some(existing_path) = &args.existing {
+                let Some(chat) = llm_ref else {
+                    return Err(
+                        "--existing (update mode) requires an LLM; pass --llm-provider/--llm-model or set GREENTIC_LLM_PROVIDER/GREENTIC_LLM_MODEL"
+                            .to_string(),
+                    );
+                };
+                let raw = fs::read_to_string(existing_path)
+                    .map_err(|err| format!("failed to read {}: {err}", existing_path.display()))?;
+                let existing: OperalaAnswers = serde_json::from_str(&raw).map_err(to_string)?;
+                let outcome =
+                    inference::update_answers(chat, &existing, &args.sorla, &args.prompt)?;
+                let output = match (&args.output, args.in_place) {
+                    (Some(output), _) => output.clone(),
+                    (None, true) => existing_path.clone(),
+                    (None, false) => existing_path.with_file_name("answers.updated.json"),
+                };
+                write_json_file(&output, &outcome.answers)?;
+                if outcome.diff.is_empty() {
+                    println!("no changes");
+                } else {
+                    println!("{}", inference::diff::format_diff(&outcome.diff));
+                }
+                println!("updated answers written to {}", output.display());
+                return Ok(());
+            }
+            let answers = prompt_answers_with_llm(&args, llm_ref)?;
             let output = args
                 .output
                 .clone()
@@ -753,46 +850,80 @@ pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
 }
 
 pub fn prompt_answers(args: &PromptArgs) -> OperalaResult<OperalaAnswers> {
+    prompt_answers_with_llm(args, None)
+}
+
+pub fn prompt_answers_with_llm(
+    args: &PromptArgs,
+    llm: Option<&dyn inference::ChatFn>,
+) -> OperalaResult<OperalaAnswers> {
     let sorla = load_sorla_contract(&SourceRef {
         kind: SourceKind::File,
         uri: args.sorla.clone(),
         digest: None,
     })?;
-    let lower_prompt = args.prompt.to_ascii_lowercase();
-    let capability = if lower_prompt.contains("bulk ingest")
-        || lower_prompt.contains("bulk upload")
-        || lower_prompt.contains("batch upload")
-        || lower_prompt.contains("upload operation")
-    {
-        "bulk_ingest"
-    } else if lower_prompt.contains("reconcil")
-        || lower_prompt.contains("bank transaction")
-        || lower_prompt.contains("rent payment")
-        || lower_prompt.contains("invoice payment")
-    {
-        "reconciliation"
-    } else {
-        return Err(follow_up_required(
-            "Which operational capability should OperaLa author for this SoRLa contract?",
-        ));
-    };
+    let capability = detect_capability(&args.prompt, llm)?;
 
-    let (extension, reconciliation, bulk_ingest, output_name) = if capability == "bulk_ingest" {
-        let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
-        (
-            EXTENSION_BULK_INGEST.to_string(),
-            None,
-            Some(bulk.clone()),
-            bulk.name.clone(),
-        )
-    } else {
-        let reconciliation = infer_reconciliation_answers(&sorla)?;
-        (
-            EXTENSION_RECONCILIATION.to_string(),
-            Some(reconciliation.clone()),
-            None,
-            reconciliation.name.clone(),
-        )
+    let (extension, reconciliation, bulk_ingest, output_name) = match (capability, llm) {
+        ("reconciliation", Some(chat)) => {
+            let value = inference::infer_capability_answers(
+                chat,
+                EXTENSION_RECONCILIATION,
+                &RECONCILIATION_EXTENSION.answers_schema(),
+                &sorla,
+                &args.prompt,
+                None,
+            )?;
+            let reconciliation: ReconciliationAnswers =
+                serde_json::from_value(value).map_err(to_string)?;
+            (
+                EXTENSION_RECONCILIATION.to_string(),
+                Some(reconciliation.clone()),
+                None,
+                reconciliation.name.clone(),
+            )
+        }
+        ("bulk_ingest", Some(chat)) => {
+            let value = inference::infer_capability_answers(
+                chat,
+                EXTENSION_BULK_INGEST,
+                &BULK_INGEST_EXTENSION.answers_schema(),
+                &sorla,
+                &args.prompt,
+                None,
+            )?;
+            let bulk: BulkIngestAnswers = serde_json::from_value(value).map_err(to_string)?;
+            (
+                EXTENSION_BULK_INGEST.to_string(),
+                None,
+                Some(bulk.clone()),
+                bulk.name.clone(),
+            )
+        }
+        ("bulk_ingest", None) => {
+            let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
+            (
+                EXTENSION_BULK_INGEST.to_string(),
+                None,
+                Some(bulk.clone()),
+                bulk.name.clone(),
+            )
+        }
+        ("reconciliation", None) => {
+            let reconciliation = infer_reconciliation_answers(&sorla)?;
+            (
+                EXTENSION_RECONCILIATION.to_string(),
+                Some(reconciliation.clone()),
+                None,
+                reconciliation.name.clone(),
+            )
+        }
+        (other, None) => {
+            return Err(format!("unsupported capability '{other}'"));
+        }
+        (other, Some(_)) => {
+            return Err(format!("unsupported capability '{other}'"));
+        }
     };
     let work_dir = PathBuf::from(format!("target/operala/{output_name}"));
     let gtpack_file_name = format!("{}.gtpack", output_name.replace('_', "-"));
@@ -827,6 +958,43 @@ pub fn prompt_answers(args: &PromptArgs) -> OperalaResult<OperalaAnswers> {
         },
         assumptions: Vec::new(),
     })
+}
+
+fn detect_capability(
+    prompt: &str,
+    llm: Option<&dyn inference::ChatFn>,
+) -> OperalaResult<&'static str> {
+    let lower_prompt = prompt.to_ascii_lowercase();
+    if lower_prompt.contains("bulk ingest")
+        || lower_prompt.contains("bulk upload")
+        || lower_prompt.contains("batch upload")
+        || lower_prompt.contains("upload operation")
+    {
+        return Ok("bulk_ingest");
+    }
+    if lower_prompt.contains("reconcil")
+        || lower_prompt.contains("bank transaction")
+        || lower_prompt.contains("rent payment")
+        || lower_prompt.contains("invoice payment")
+    {
+        return Ok("reconciliation");
+    }
+    if let Some(chat) = llm
+        && let Some(capability) = inference::classify_capability(chat, prompt)?
+    {
+        return Ok(match capability.as_str() {
+            "reconciliation" => "reconciliation",
+            "bulk_ingest" => "bulk_ingest",
+            _ => {
+                return Err(follow_up_required(&format!(
+                    "the LLM classified this as '{capability}', which OperaLa does not author; which operational capability should it use for this SoRLa contract?"
+                )));
+            }
+        });
+    }
+    Err(follow_up_required(
+        "Which operational capability should OperaLa author for this SoRLa contract?",
+    ))
 }
 
 pub fn wizard_schema(locale: Option<&str>) -> Value {
@@ -2360,6 +2528,11 @@ mod tests {
             team: Some("property-ops".to_string()),
             locale: Some("en-GB".to_string()),
             output: None,
+            llm_provider: None,
+            llm_model: None,
+            no_llm: false,
+            existing: None,
+            in_place: false,
             prompt: "Set up rent payment reconciliation from bank transactions".to_string(),
         })
         .expect("prompt produces answers");
@@ -2398,6 +2571,11 @@ mod tests {
             team: None,
             locale: None,
             output: None,
+            llm_provider: None,
+            llm_model: None,
+            no_llm: false,
+            existing: None,
+            in_place: false,
             prompt: "Help my operations team with something".to_string(),
         })
         .expect_err("unclear prompt should need follow-up");
@@ -2443,6 +2621,11 @@ mod tests {
             team: Some("finance".to_string()),
             locale: Some("en-GB".to_string()),
             output: None,
+            llm_provider: None,
+            llm_model: None,
+            no_llm: false,
+            existing: None,
+            in_place: false,
             prompt: "Create a generic bulk upload operation from a JSON batch file with exactly 3 tenants, 3 tenancies, and 6 payments.".to_string(),
         })
         .expect("bulk upload prompt produces answers");
@@ -2685,5 +2868,278 @@ mod tests {
         answers.locale = Some("nl-NL".to_string());
         let err = run_wizard(&answers).expect_err("unknown extension should fail");
         assert!(err.contains("Onbekende OperaLa-extensie"));
+    }
+
+    #[test]
+    fn prompt_args_parse_llm_flags() {
+        use clap::Parser;
+        let cli = OperalaCli::parse_from([
+            "greentic-operala",
+            "prompt",
+            "--sorla",
+            "s.yaml",
+            "--llm-provider",
+            "anthropic",
+            "--llm-model",
+            "claude-sonnet-4-6",
+            "--existing",
+            "old-answers.json",
+            "--in-place",
+            "update the tolerance",
+        ]);
+        let OperalaCommand::Prompt(args) = cli.command else {
+            panic!("expected prompt command");
+        };
+        assert_eq!(
+            args.llm_provider,
+            Some(greentic_llm::ProviderKind::Anthropic)
+        );
+        assert_eq!(args.llm_model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(
+            args.existing.as_deref(),
+            Some(std::path::Path::new("old-answers.json"))
+        );
+        assert!(args.in_place);
+        assert!(!args.no_llm);
+    }
+
+    #[test]
+    fn reconciliation_answers_schema_round_trips_the_fixture() {
+        let schema = RECONCILIATION_EXTENSION.answers_schema();
+        assert_eq!(schema["type"], "object");
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for field in [
+            "name",
+            "source_event",
+            "expected_record",
+            "settlement_record",
+            "exception_record",
+            "input_modes",
+            "source_fields",
+            "expected_fields",
+            "matching",
+            "exception_policy",
+            "actions",
+            "agent_endpoints",
+        ] {
+            assert!(required.contains(&field), "missing required field {field}");
+        }
+    }
+
+    #[test]
+    fn bulk_ingest_answers_schema_has_required_fields() {
+        let schema = BULK_INGEST_EXTENSION.answers_schema();
+        assert_eq!(schema["type"], "object");
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for field in [
+            "name",
+            "input_modes",
+            "record_collections",
+            "actions",
+            "validation",
+        ] {
+            assert!(required.contains(&field), "missing required field {field}");
+        }
+    }
+
+    #[test]
+    fn llm_backed_prompt_produces_validated_answers() {
+        let answers_value: serde_json::Value = {
+            let fixture: OperalaAnswers = serde_json::from_str(include_str!(
+                "../extensions/reconciliation/examples/tenancy/answers.json"
+            ))
+            .unwrap();
+            serde_json::to_value(fixture.capability_answers.reconciliation.unwrap()).unwrap()
+        };
+        let chat = inference::tests_support::scripted_chat(vec![inference::tests_support::emit(
+            answers_value,
+        )]);
+        let answers = prompt_answers_with_llm(
+            &PromptArgs {
+                sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+                locale: Some("en-GB".into()),
+                output: None,
+                tenant: Some("acme-property".into()),
+                team: None,
+                llm_provider: None,
+                llm_model: None,
+                no_llm: false,
+                existing: None,
+                in_place: false,
+                prompt: "Set up rent payment reconciliation from bank transactions".into(),
+            },
+            Some(&chat),
+        )
+        .expect("llm prompt produces answers");
+        assert_eq!(answers.extension, EXTENSION_RECONCILIATION);
+        let reconciliation = answers
+            .capability_answers
+            .reconciliation
+            .as_ref()
+            .expect("nested");
+        assert_eq!(reconciliation.source_event, "BankTransaction");
+        validate_answers(&answers).expect("llm answers validate");
+    }
+
+    #[test]
+    fn no_llm_path_is_byte_identical_to_legacy_keyword_path() {
+        let args = PromptArgs {
+            sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+            locale: Some("en-GB".into()),
+            output: None,
+            tenant: Some("acme-property".into()),
+            team: Some("property-ops".into()),
+            llm_provider: None,
+            llm_model: None,
+            no_llm: true,
+            existing: None,
+            in_place: false,
+            prompt: "Set up rent payment reconciliation from bank transactions".into(),
+        };
+        let via_wrapper = prompt_answers(&args).expect("wrapper works");
+        let via_llm_none = prompt_answers_with_llm(&args, None).expect("explicit none works");
+        assert_eq!(
+            serde_json::to_string(&via_wrapper).unwrap(),
+            serde_json::to_string(&via_llm_none).unwrap()
+        );
+    }
+
+    #[test]
+    fn update_mode_changes_only_the_instructed_field() {
+        let existing: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .unwrap();
+        let mut updated_value =
+            serde_json::to_value(existing.capability_answers.reconciliation.clone().unwrap())
+                .unwrap();
+        updated_value["matching"]["amount_tolerance"] = serde_json::json!(5.0);
+        let chat = inference::tests_support::scripted_chat(vec![inference::tests_support::emit(
+            updated_value,
+        )]);
+
+        let outcome = inference::update_answers(
+            &chat,
+            &existing,
+            "extensions/reconciliation/examples/tenancy/sorla.yaml",
+            "raise the amount tolerance to 5",
+        )
+        .expect("update succeeds");
+
+        let updated_reconciliation = outcome
+            .answers
+            .capability_answers
+            .reconciliation
+            .as_ref()
+            .expect("nested");
+        assert_eq!(updated_reconciliation.matching.amount_tolerance, 5.0);
+        // Envelope preserved:
+        assert_eq!(outcome.answers.tenant, existing.tenant);
+        assert_eq!(outcome.answers.outputs.work_dir, existing.outputs.work_dir);
+        // Diff names the changed capability path (intent also changes — assert the capability change is present):
+        assert!(
+            outcome
+                .diff
+                .iter()
+                .any(|e| e.path == "capability_answers.reconciliation.matching.amount_tolerance"),
+            "diff: {:?}",
+            outcome.diff
+        );
+    }
+
+    #[test]
+    fn llm_classifier_fallback_routes_non_keyword_prompt() {
+        // Plain-content classification response (classifier reads message content).
+        fn classify(content: &str) -> greentic_llm::ChatResponse {
+            greentic_llm::ChatResponse {
+                content: content.into(),
+                tool_calls: vec![],
+                finish_reason: greentic_llm::FinishReason::Stop,
+            }
+        }
+        let recon_value: serde_json::Value = {
+            let fixture: OperalaAnswers = serde_json::from_str(include_str!(
+                "../extensions/reconciliation/examples/tenancy/answers.json"
+            ))
+            .unwrap();
+            serde_json::to_value(fixture.capability_answers.reconciliation.unwrap()).unwrap()
+        };
+        let chat = inference::tests_support::scripted_chat(vec![
+            classify(r#"{"capability": "reconciliation"}"#),
+            inference::tests_support::emit(recon_value),
+        ]);
+        let answers = prompt_answers_with_llm(
+            &PromptArgs {
+                sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+                locale: Some("en-GB".into()),
+                output: None,
+                tenant: Some("acme".into()),
+                team: None,
+                llm_provider: None,
+                llm_model: None,
+                no_llm: false,
+                existing: None,
+                in_place: false,
+                // deliberately keyword-free so the classifier branch runs:
+                prompt: "help me settle incoming money against what tenants owe".into(),
+            },
+            Some(&chat),
+        )
+        .expect("classifier-routed prompt produces answers");
+        assert_eq!(answers.extension, EXTENSION_RECONCILIATION);
+        assert_eq!(
+            answers.detected_capability.as_deref(),
+            Some("reconciliation")
+        );
+        validate_answers(&answers).expect("validates");
+    }
+
+    #[test]
+    fn llm_bulk_ingest_new_mode_produces_validated_answers() {
+        let bulk_value = serde_json::json!({
+            "name": "tenancy_bulk_ingest",
+            "input_modes": ["batch"],
+            "record_collections": { "payments": "Payment" },
+            "actions": { "create_payment": "create_payment" },
+            "validation": { "atomic": true, "dry_run": true, "require_unique_ids": true, "validate_references": true }
+        });
+        let chat = inference::tests_support::scripted_chat(vec![inference::tests_support::emit(
+            bulk_value,
+        )]);
+        let answers = prompt_answers_with_llm(
+            &PromptArgs {
+                sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+                locale: Some("en-GB".into()),
+                output: None,
+                tenant: Some("acme".into()),
+                team: None,
+                llm_provider: None,
+                llm_model: None,
+                no_llm: false,
+                existing: None,
+                in_place: false,
+                prompt: "bulk ingest historical records".into(),
+            },
+            Some(&chat),
+        )
+        .expect("bulk llm prompt produces answers");
+        assert_eq!(answers.extension, EXTENSION_BULK_INGEST);
+        let bulk = answers
+            .capability_answers
+            .bulk_ingest
+            .as_ref()
+            .expect("nested bulk");
+        assert!(!bulk.record_collections.is_empty());
+        validate_answers(&answers).expect("validates");
     }
 }
