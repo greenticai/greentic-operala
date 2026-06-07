@@ -1783,8 +1783,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-llm"
-version = "0.1.0"
-source = "git+https://github.com/greenticai/greentic-llm?tag=v0.1.0#ab0e7b1ba190a04fc2066610e9bd4eade2e36468"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "013476da6d2549bd32bbb1099c0b4cc872aea2aa1f00e643089c89edf75273ea"
 dependencies = [
  "anyhow",
  "async-trait",
