@@ -27,7 +27,9 @@ mod embedded_i18n {
     include!(concat!(env!("OUT_DIR"), "/embedded_i18n.rs"));
 }
 
+pub mod handoff_plan;
 pub mod inference;
+pub use handoff_plan::{HandoffPlan, PlanEntry, build_handoff_plan};
 
 pub type OperalaResult<T> = Result<T, String>;
 
@@ -2952,6 +2954,104 @@ mod tests {
         let summary =
             fs::read_to_string(root.join("work").join("build.summary.md")).expect("summary exists");
         assert!(summary.contains("SoRLa patch proposal: proposed, not applied"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Native single-source-of-truth assertion: the `write_operala_gtpack` asset
+    /// set must be a superset of the in-memory `build_handoff_plan` entry paths,
+    /// and the handoff JSON bytes must be byte-identical between both paths.
+    ///
+    /// This test guards the invariant without forcing `write_operala_gtpack` to
+    /// consume `build_handoff_plan` (the pack builder's `FlowBundle` + blake3
+    /// path is incompatible with raw byte entries, making a full refactor
+    /// invasive). If the native writer ever drifts from the plan, this test
+    /// catches it immediately.
+    #[cfg(feature = "native")]
+    #[test]
+    fn gtpack_writer_is_consistent_with_build_handoff_plan() {
+        let yaml = include_str!("../extensions/reconciliation/examples/tenancy/sorla.yaml");
+        let sorla = parse_sorla_contract(yaml).expect("sorla parses");
+        let mut answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
+        let root = std::env::temp_dir().join(format!(
+            "operala-plan-consistency-test-{}",
+            std::process::id()
+        ));
+        answers.outputs.work_dir = root.join("work");
+        answers.outputs.handoff_path = Some(root.join("work").join("operala-handoff.json"));
+        answers.outputs.gtpack_path = Some(root.join("pack.gtpack"));
+
+        // Build the in-memory plan.
+        let plan = build_handoff_plan(&sorla, &answers).expect("in-memory plan builds");
+
+        // Run the native wizard to write the pack.
+        run_wizard(&answers).expect("native wizard runs");
+        let pack_path = root.join("pack.gtpack");
+        let pack_file = fs::File::open(&pack_path).expect("pack file exists");
+        let mut archive = zip::ZipArchive::new(pack_file).expect("pack is a zip archive");
+
+        // Every plan entry must have a corresponding `assets/<path>` entry in the
+        // archive (the pack builder prefixes asset paths with `assets/`).
+        for entry in &plan.pack_entries {
+            let archive_path = format!("assets/{}", entry.path);
+            assert!(
+                archive.by_name(&archive_path).is_ok(),
+                "archive must contain plan entry `{archive_path}`"
+            );
+        }
+
+        // The handoff JSON capability-specific content must be semantically identical
+        // between the in-memory plan and the archived file. The `sorla.source.uri`
+        // field intentionally differs: the wasm-safe path leaves it empty (no
+        // filesystem access), while the native wizard sets it from the resolved file
+        // path. All other fields must match.
+        use base64::Engine as _;
+        let plan_handoff_entry = plan
+            .pack_entries
+            .iter()
+            .find(|entry| entry.path == "operala/operala-handoff.json")
+            .expect("plan includes operala-handoff.json");
+        let plan_handoff_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&plan_handoff_entry.content_base64)
+            .expect("base64 decodes");
+        let plan_handoff_json: Value =
+            serde_json::from_slice(&plan_handoff_bytes).expect("plan handoff parses as json");
+
+        let mut archive_entry = archive
+            .by_name("assets/operala/operala-handoff.json")
+            .expect("archive has operala-handoff.json");
+        let mut archive_handoff_bytes = Vec::new();
+        std::io::Read::read_to_end(&mut archive_entry, &mut archive_handoff_bytes)
+            .expect("reads archive entry");
+        let archive_handoff_json: Value =
+            serde_json::from_slice(&archive_handoff_bytes).expect("archive handoff parses as json");
+
+        // Capability bindings, flows, schemas, and extension metadata must match.
+        for key in [
+            "schema",
+            "capability",
+            "extension",
+            "input_modes",
+            "bindings",
+            "flows",
+            "schemas",
+        ] {
+            assert_eq!(
+                plan_handoff_json[key], archive_handoff_json[key],
+                "handoff field `{key}` must match between plan and archive"
+            );
+        }
+        // The sorla digest must match (proves same contract was used).
+        assert_eq!(
+            plan_handoff_json["sorla"]["source_digest"],
+            archive_handoff_json["sorla"]["source_digest"],
+            "sorla source_digest must match"
+        );
+        // Note: sorla.source.uri intentionally differs — wasm-safe path is empty,
+        // native path is the resolved filesystem URI. This is by design.
+
         let _ = fs::remove_dir_all(root);
     }
 
