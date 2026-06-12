@@ -13,7 +13,10 @@ pub use wire::{
     WireToolSpec,
 };
 
-use crate::{OperalaResult, PromptArgs, SorlaContract, follow_up_required};
+#[cfg(feature = "native")]
+use crate::PromptArgs;
+use crate::{OperalaResult, SorlaContract, follow_up_required};
+#[cfg(feature = "native")]
 use greentic_llm::{CredentialSource, EnvCredentialSource, LlmProvider, ProviderKind, RigBackend};
 use serde_json::Value;
 
@@ -114,6 +117,9 @@ pub struct UpdateOutcome {
 /// Update mode: regenerate the capability answers via LLM from the existing
 /// document + change instruction; preserve the outer envelope; return the
 /// validated document plus a structural diff for human review.
+///
+/// Requires `native` feature (reads SoRLa from the filesystem).
+#[cfg(feature = "native")]
 pub fn update_answers(
     chat: &dyn ChatFn,
     existing: &crate::OperalaAnswers,
@@ -182,6 +188,25 @@ pub fn update_answers(
     })
 }
 
+/// Test seam: session functions take `&dyn ChatFn` so tests inject the
+/// scripted mock without a real backend or runtime. Implementors receive
+/// backend-agnostic wire types; `LlmRuntime` converts to/from greentic-llm
+/// at its own boundary.
+pub trait ChatFn {
+    fn chat(&self, request: WireChatRequest) -> Result<WireChatResponse, WireChatError>;
+
+    /// Whether the underlying provider supports native tool calling.
+    /// Defaults to true; `LlmRuntime` reports the real capability.
+    fn tools_supported(&self) -> bool {
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Native-only: LLM runtime, resolver, and greentic-llm conversion helpers.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedLlm {
     pub provider: ProviderKind,
@@ -191,6 +216,7 @@ pub struct ResolvedLlm {
 /// Resolve whether this invocation uses an LLM. Precedence: `--no-llm` >
 /// flags > `GREENTIC_LLM_PROVIDER`/`GREENTIC_LLM_MODEL` env > unset (None →
 /// deterministic keyword path). Env access is injected for testability.
+#[cfg(feature = "native")]
 pub fn resolve_llm_request(
     args: &PromptArgs,
     env: &dyn Fn(&str) -> Option<String>,
@@ -225,6 +251,7 @@ pub fn resolve_llm_request(
 }
 
 /// Production wrapper over [`resolve_llm_request`] reading real process env.
+#[cfg(feature = "native")]
 pub fn resolve_llm_request_from_process_env(
     args: &PromptArgs,
 ) -> OperalaResult<Option<ResolvedLlm>> {
@@ -233,11 +260,13 @@ pub fn resolve_llm_request_from_process_env(
 
 /// Owns the tokio runtime + provider backend for one CLI invocation.
 /// Operala is a sync binary; all async crate calls are `block_on`'d here.
+#[cfg(feature = "native")]
 pub struct LlmRuntime {
     runtime: tokio::runtime::Runtime,
     backend: RigBackend,
 }
 
+#[cfg(feature = "native")]
 impl LlmRuntime {
     pub fn build(resolved: &ResolvedLlm) -> OperalaResult<Self> {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -265,20 +294,7 @@ impl LlmRuntime {
     }
 }
 
-/// Test seam: session functions take `&dyn ChatFn` so tests inject the
-/// scripted mock without a real backend or runtime. Implementors receive
-/// backend-agnostic wire types; `LlmRuntime` converts to/from greentic-llm
-/// at its own boundary.
-pub trait ChatFn {
-    fn chat(&self, request: WireChatRequest) -> Result<WireChatResponse, WireChatError>;
-
-    /// Whether the underlying provider supports native tool calling.
-    /// Defaults to true; `LlmRuntime` reports the real capability.
-    fn tools_supported(&self) -> bool {
-        true
-    }
-}
-
+#[cfg(feature = "native")]
 impl ChatFn for LlmRuntime {
     fn chat(&self, request: WireChatRequest) -> Result<WireChatResponse, WireChatError> {
         let llm_request = wire_request_to_llm(request);
@@ -297,6 +313,7 @@ impl ChatFn for LlmRuntime {
 // Conversion helpers — live next to LlmRuntime, stay native-only.
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "native")]
 fn wire_request_to_llm(request: WireChatRequest) -> greentic_llm::ChatRequest {
     greentic_llm::ChatRequest {
         messages: request
@@ -323,6 +340,7 @@ fn wire_request_to_llm(request: WireChatRequest) -> greentic_llm::ChatRequest {
     }
 }
 
+#[cfg(feature = "native")]
 fn wire_role_to_llm(role: WireRole) -> greentic_llm::MessageRole {
     match role {
         WireRole::System => greentic_llm::MessageRole::System,
@@ -332,6 +350,7 @@ fn wire_role_to_llm(role: WireRole) -> greentic_llm::MessageRole {
     }
 }
 
+#[cfg(feature = "native")]
 fn llm_response_to_wire(response: greentic_llm::ChatResponse) -> WireChatResponse {
     WireChatResponse {
         content: response.content,
@@ -348,75 +367,56 @@ fn llm_response_to_wire(response: greentic_llm::ChatResponse) -> WireChatRespons
 
 #[cfg(test)]
 pub(crate) mod tests_support {
-    use super::{ChatFn, WireChatError, WireChatRequest, WireChatResponse};
-    use greentic_llm::mock::{TestLlmProvider, TestLlmProviderBuilder};
-    use greentic_llm::{ChatResponse, FinishReason, ToolCall};
+    use super::{ChatFn, WireChatError, WireChatRequest, WireChatResponse, WireToolCall};
+    use std::cell::RefCell;
 
-    /// Test ChatFn backed by the scripted mock. Sync-only: owns its own
-    /// current-thread runtime, so it must not be driven from inside an
-    /// existing tokio runtime.
+    /// Pure wire-native scripted chat mock. No greentic-llm dependency —
+    /// works in all feature configurations including no-default-features / wasm.
     ///
-    /// The mock still stores `greentic_llm::ChatResponse` internally; this
-    /// adapter converts wire request → llm request → scripted llm response →
-    /// wire response so the inference pipeline sees only wire types.
-    pub struct ScriptedChat(TestLlmProvider, tokio::runtime::Runtime);
+    /// Responses are consumed in order; each `chat()` call pops the next one.
+    /// Panics if the script is exhausted (test bug: too many chat calls).
+    pub struct ScriptedChat(RefCell<Vec<WireChatResponse>>);
 
     impl ChatFn for ScriptedChat {
-        fn chat(&self, request: WireChatRequest) -> Result<WireChatResponse, WireChatError> {
-            let llm_request = super::wire_request_to_llm(request);
-            let llm_response = self
-                .1
-                .block_on(greentic_llm::LlmProvider::chat(&self.0, llm_request))
-                .map_err(|err| WireChatError {
-                    message: err.to_string(),
-                })?;
-            Ok(super::llm_response_to_wire(llm_response))
+        fn chat(&self, _request: WireChatRequest) -> Result<WireChatResponse, WireChatError> {
+            let mut queue = self.0.borrow_mut();
+            if queue.is_empty() {
+                panic!("ScriptedChat: no more scripted responses (test exhausted the script)");
+            }
+            Ok(queue.remove(0))
         }
     }
 
-    pub fn scripted_chat(responses: Vec<ChatResponse>) -> ScriptedChat {
-        let mut builder = TestLlmProviderBuilder::new();
-        for response in responses {
-            builder = builder.script_response(response);
-        }
-        ScriptedChat(
-            builder.build(),
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap(),
-        )
+    /// Build a `ScriptedChat` from a list of wire responses.
+    pub fn scripted_chat(responses: Vec<WireChatResponse>) -> ScriptedChat {
+        ScriptedChat(RefCell::new(responses))
     }
 
-    /// Build a scripted `ChatResponse` that calls the `emit_answers` tool.
-    /// Returns a `greentic_llm::ChatResponse` so it can be queued into the mock.
-    pub fn emit(value: serde_json::Value) -> ChatResponse {
-        ChatResponse {
+    /// Build a wire response that calls the `emit_answers` tool.
+    pub fn emit(value: serde_json::Value) -> WireChatResponse {
+        WireChatResponse {
             content: String::new(),
-            tool_calls: vec![ToolCall {
-                id: "c".into(),
+            tool_calls: vec![WireToolCall {
                 name: "emit_answers".into(),
                 arguments: value,
             }],
-            finish_reason: FinishReason::ToolCalls,
         }
     }
 
-    /// Build a scripted `ChatResponse` that calls the `follow_up` tool.
-    pub fn follow_up(question: &str) -> ChatResponse {
-        ChatResponse {
+    /// Build a wire response that calls the `follow_up` tool.
+    pub fn follow_up(question: &str) -> WireChatResponse {
+        WireChatResponse {
             content: String::new(),
-            tool_calls: vec![ToolCall {
-                id: "c".into(),
+            tool_calls: vec![WireToolCall {
                 name: "follow_up".into(),
                 arguments: serde_json::json!({ "question": question }),
             }],
-            finish_reason: FinishReason::ToolCalls,
         }
     }
 }
 
 #[cfg(test)]
+#[cfg(feature = "native")]
 mod driver_tests {
     use super::*;
     use crate::OperaLaExtension;
@@ -509,6 +509,7 @@ mod driver_tests {
 }
 
 #[cfg(test)]
+#[cfg(feature = "native")]
 mod tests {
     use super::*;
 
