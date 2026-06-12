@@ -21,16 +21,13 @@ pub fn sorla_catalog(sorla: &SorlaContract) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SourceKind, SourceRef, load_sorla_contract};
 
     #[test]
     fn catalog_lists_all_bindable_identifiers() {
-        let sorla = load_sorla_contract(&SourceRef {
-            kind: SourceKind::File,
-            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
-            digest: None,
-        })
-        .expect("fixture sorla loads");
+        let sorla = crate::parse_sorla_contract(include_str!(
+            "../../extensions/reconciliation/examples/tenancy/sorla.yaml"
+        ))
+        .expect("fixture sorla parses");
         let catalog = sorla_catalog(&sorla);
         let records = catalog["records"].as_array().expect("records array");
         assert!(records.iter().any(|r| r == "RentObligation"));

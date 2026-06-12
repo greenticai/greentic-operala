@@ -424,6 +424,8 @@ pub(crate) mod tests_support {
     }
 
     /// Build a wire response that calls the `follow_up` tool.
+    // Used by native-gated driver_tests; allowed dead-code in wasm-safe builds.
+    #[allow(dead_code)]
     pub fn follow_up(question: &str) -> WireChatResponse {
         WireChatResponse {
             content: String::new(),

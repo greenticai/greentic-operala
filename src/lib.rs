@@ -894,26 +894,8 @@ pub fn prompt_answers_with_llm(
         llm,
     )?;
     // Override the sorla source URI with the actual file path provided by the caller.
+    // All other output paths are already set correctly by `prompt_answers_for_contract`.
     answers.sorla.source.uri = args.sorla.clone();
-    // Override work_dir with the native filesystem layout.
-    let output_name = answers
-        .capability_answers
-        .reconciliation
-        .as_ref()
-        .map(|r| r.name.clone())
-        .or_else(|| {
-            answers
-                .capability_answers
-                .bulk_ingest
-                .as_ref()
-                .map(|b| b.name.clone())
-        })
-        .unwrap_or_else(|| "operala".to_string());
-    let work_dir = PathBuf::from(format!("target/operala/{output_name}"));
-    let gtpack_file_name = format!("{}.gtpack", output_name.replace('_', "-"));
-    answers.outputs.handoff_path = Some(work_dir.join("operala-handoff.json"));
-    answers.outputs.gtpack_path = Some(work_dir.join(gtpack_file_name));
-    answers.outputs.work_dir = work_dir;
     Ok(answers)
 }
 
@@ -1581,8 +1563,12 @@ fn follow_up_required(question: &str) -> String {
     format!("follow-up required: {question}")
 }
 
-#[cfg(feature = "native")]
-fn sorla_patch_proposal(
+/// Build a SoRLa patch proposal from a readiness report.
+///
+/// Used by the wizard natively and the designer-extension validate tool in wasm.
+/// The proposal is pure JSON construction — no filesystem access — so it is
+/// wasm-safe and compiles without the `native` feature.
+pub fn sorla_patch_proposal(
     readiness: &ReadinessReport,
     sorla: &SorlaContract,
 ) -> OperalaResult<Value> {
@@ -1631,7 +1617,6 @@ fn sorla_patch_proposal(
     Ok(proposal)
 }
 
-#[cfg(feature = "native")]
 fn add_payment_record_operation(record_name: &str) -> Value {
     let patch_name = patch_record_name(record_name);
     json!({
@@ -1651,7 +1636,6 @@ fn add_payment_record_operation(record_name: &str) -> Value {
     })
 }
 
-#[cfg(feature = "native")]
 fn add_reconciliation_case_record_operation(record_name: &str) -> Value {
     let patch_name = patch_record_name(record_name);
     json!({
@@ -1671,7 +1655,6 @@ fn add_reconciliation_case_record_operation(record_name: &str) -> Value {
     })
 }
 
-#[cfg(feature = "native")]
 fn validate_sorla_patch_proposal(proposal: &Value) -> OperalaResult<()> {
     if proposal["schema"] != "greentic.sorla.patch.v1" {
         return Err("SoRLa patch proposal has unsupported schema".to_string());
@@ -1735,14 +1718,12 @@ fn validate_sorla_patch_proposal(proposal: &Value) -> OperalaResult<()> {
     Ok(())
 }
 
-#[cfg(feature = "native")]
 fn missing_concept_name(message: &str) -> Option<&str> {
     let (_, rest) = message.split_once('`')?;
     let (name, _) = rest.split_once('`')?;
     Some(name)
 }
 
-#[cfg(feature = "native")]
 fn patch_record_name(name: &str) -> String {
     let mut out = String::new();
     let mut previous_was_separator = true;
@@ -1770,7 +1751,6 @@ fn patch_record_name(name: &str) -> String {
     }
 }
 
-#[cfg(feature = "native")]
 fn is_sorla_patch_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -3361,5 +3341,39 @@ mod tests {
             .expect("nested bulk");
         assert!(!bulk.record_collections.is_empty());
         validate_answers(&answers).expect("validates");
+    }
+
+    /// Wasm-safe: exercises `sorla_patch_proposal` without filesystem access.
+    ///
+    /// Constructs a `ReadinessReport` with a missing settlement record (mimicking a
+    /// SoRLa contract that lacks the `Payment` record) and verifies that
+    /// `sorla_patch_proposal` returns a proposal that names the missing record.
+    #[test]
+    fn sorla_patch_proposal_names_missing_record_in_wasm_safe_path() {
+        let sorla = parse_sorla_contract(include_str!(
+            "../extensions/reconciliation/examples/tenancy/sorla.yaml"
+        ))
+        .expect("fixture sorla parses");
+
+        let readiness = ReadinessReport {
+            schema: "greentic.operala.readiness.v1".to_string(),
+            capability: EXTENSION_RECONCILIATION.to_string(),
+            status: ReadinessStatus::NeedsSorlaChanges,
+            found: Default::default(),
+            missing: vec![
+                "settlement_record `MissingPayment` not found in SoRLa records".to_string(),
+            ],
+            warnings: vec![],
+            summary: "missing settlement record".to_string(),
+        };
+
+        let proposal = sorla_patch_proposal(&readiness, &sorla)
+            .expect("patch proposal builds from wasm-safe path");
+        assert_eq!(proposal["schema"], "greentic.sorla.patch.v1");
+        assert_eq!(proposal["status"], "proposed");
+        let operations = proposal["operations"].as_array().expect("operations array");
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0]["op"], "add_record");
+        assert_eq!(operations[0]["record"]["requested_name"], "MissingPayment");
     }
 }

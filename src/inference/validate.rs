@@ -121,15 +121,12 @@ pub fn validate_capability_answers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SourceKind, SourceRef, load_sorla_contract};
 
     fn fixture_sorla() -> SorlaContract {
-        load_sorla_contract(&SourceRef {
-            kind: SourceKind::File,
-            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
-            digest: None,
-        })
-        .expect("fixture sorla loads")
+        crate::parse_sorla_contract(include_str!(
+            "../../extensions/reconciliation/examples/tenancy/sorla.yaml"
+        ))
+        .expect("fixture sorla parses")
     }
 
     fn valid_reconciliation_value() -> Value {
