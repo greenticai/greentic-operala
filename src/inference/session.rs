@@ -2,10 +2,12 @@
 //! outcomes from tool calls (tools-capable providers) or JSON content (the
 //! fallback for providers with `capabilities().tools == false`).
 
-use greentic_llm::{ChatMessage, ChatRequest, ChatResponse, MessageRole, ToolDef};
 use serde_json::Value;
 
 use crate::OperalaResult;
+use crate::inference::wire::{
+    WireChatMessage, WireChatRequest, WireChatResponse, WireRole, WireToolSpec,
+};
 
 #[derive(Debug, PartialEq)]
 pub enum InferenceOutcome {
@@ -27,7 +29,7 @@ fn content_as_json(content: &str) -> Option<Value> {
 
 /// Parse one chat response into an inference outcome. Tool calls win; JSON
 /// content is the fallback for non-tools providers.
-pub fn parse_outcome(response: &ChatResponse) -> OperalaResult<InferenceOutcome> {
+pub fn parse_outcome(response: &WireChatResponse) -> OperalaResult<InferenceOutcome> {
     if let Some(call) = response.tool_calls.first() {
         return match call.name.as_str() {
             "emit_answers" => Ok(InferenceOutcome::Answers(call.arguments.clone())),
@@ -59,7 +61,7 @@ pub fn parse_outcome(response: &ChatResponse) -> OperalaResult<InferenceOutcome>
 
 /// Parse the capability-classification response: `{"capability": "<id>"}`.
 /// Returns None for "unknown" (caller falls back to follow_up_required).
-pub fn parse_classification(response: &ChatResponse) -> OperalaResult<Option<String>> {
+pub fn parse_classification(response: &WireChatResponse) -> OperalaResult<Option<String>> {
     let json = content_as_json(&response.content).ok_or_else(|| {
         format!(
             "LLM classification was not JSON; content was: {}",
@@ -75,20 +77,20 @@ pub fn parse_classification(response: &ChatResponse) -> OperalaResult<Option<Str
 /// System prompt shared by all inference calls.
 pub const SYSTEM_PROMPT: &str = "You are OperaLa, an authoring assistant for operational business logic on the Greentic platform. You bind operational capabilities to a SoRLa (system-of-record) contract. Bind ONLY to identifiers present in the provided SoRLa catalog — never invent record, event, action, or endpoint names. If the intent is ambiguous or a required binding has no plausible catalog match, use follow_up to ask ONE clarifying question.";
 
-pub fn emit_answers_tool(schema: Value) -> ToolDef {
-    ToolDef {
+pub fn emit_answers_tool(schema: Value) -> WireToolSpec {
+    WireToolSpec {
         name: "emit_answers".into(),
         description: "Emit the complete capability answers object, binding every field to catalog identifiers.".into(),
-        schema,
+        parameters: schema,
     }
 }
 
-pub fn follow_up_tool() -> ToolDef {
-    ToolDef {
+pub fn follow_up_tool() -> WireToolSpec {
+    WireToolSpec {
         name: "follow_up".into(),
         description:
             "Ask the user one clarifying question when the intent or a binding is ambiguous.".into(),
-        schema: serde_json::json!({
+        parameters: serde_json::json!({
             "type": "object",
             "required": ["question"],
             "properties": { "question": { "type": "string" } }
@@ -101,7 +103,7 @@ pub fn inference_messages(
     catalog: &Value,
     intent: &str,
     existing_answers: Option<&Value>,
-) -> Vec<ChatMessage> {
+) -> Vec<WireChatMessage> {
     let mut user = format!(
         "SoRLa catalog (the ONLY identifiers you may bind to):\n{}\n\n",
         serde_json::to_string_pretty(catalog).unwrap_or_default()
@@ -120,28 +122,26 @@ pub fn inference_messages(
         }
     }
     vec![
-        ChatMessage {
-            role: MessageRole::System,
+        WireChatMessage {
+            role: WireRole::System,
             content: SYSTEM_PROMPT.into(),
-            images: vec![],
         },
-        ChatMessage {
-            role: MessageRole::User,
+        WireChatMessage {
+            role: WireRole::User,
             content: user,
-            images: vec![],
         },
     ]
 }
 
-/// Build a ChatRequest. Tools-capable providers get real tools; others get a
-/// JSON-mode instruction appended to the system message.
+/// Build a `WireChatRequest`. Tools-capable providers get real tools; others
+/// get a JSON-mode instruction appended to the system message.
 pub fn build_request(
-    messages: Vec<ChatMessage>,
+    messages: Vec<WireChatMessage>,
     answers_schema: Value,
     tools_supported: bool,
-) -> ChatRequest {
+) -> WireChatRequest {
     if tools_supported {
-        ChatRequest {
+        WireChatRequest {
             messages,
             tools: vec![emit_answers_tool(answers_schema), follow_up_tool()],
             tool_choice: Some("required".into()),
@@ -156,7 +156,7 @@ pub fn build_request(
                 answers_schema
             ));
         }
-        ChatRequest {
+        WireChatRequest {
             messages,
             tools: vec![],
             tool_choice: None,
@@ -169,25 +169,22 @@ pub fn build_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use greentic_llm::{FinishReason, ToolCall};
+    use crate::inference::wire::WireToolCall;
 
-    fn tool_response(name: &str, arguments: Value) -> ChatResponse {
-        ChatResponse {
+    fn tool_response(name: &str, arguments: Value) -> WireChatResponse {
+        WireChatResponse {
             content: String::new(),
-            tool_calls: vec![ToolCall {
-                id: "call_1".into(),
+            tool_calls: vec![WireToolCall {
                 name: name.into(),
                 arguments,
             }],
-            finish_reason: FinishReason::ToolCalls,
         }
     }
 
-    fn text_response(content: &str) -> ChatResponse {
-        ChatResponse {
+    fn text_response(content: &str) -> WireChatResponse {
+        WireChatResponse {
             content: content.into(),
             tool_calls: vec![],
-            finish_reason: FinishReason::Stop,
         }
     }
 

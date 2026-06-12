@@ -6,6 +6,12 @@ pub mod catalog;
 pub mod diff;
 pub mod session;
 pub mod validate;
+pub mod wire;
+
+pub use wire::{
+    WireChatError, WireChatMessage, WireChatRequest, WireChatResponse, WireRole, WireToolCall,
+    WireToolSpec,
+};
 
 use crate::{OperalaResult, PromptArgs, SorlaContract, follow_up_required};
 use greentic_llm::{CredentialSource, EnvCredentialSource, LlmProvider, ProviderKind, RigBackend};
@@ -44,25 +50,23 @@ pub fn infer_capability_answers(
                 match validate_capability_answers(extension_id, &value, sorla) {
                     Ok(()) => return Ok(value),
                     Err(errors) => {
-                        messages.push(greentic_llm::ChatMessage {
-                            role: greentic_llm::MessageRole::User,
+                        messages.push(WireChatMessage {
+                            role: WireRole::User,
                             content: format!(
                                 "Your answers failed validation:\n- {}\nEmit a corrected complete answers object via emit_answers, binding only to catalog identifiers.",
                                 errors.join("\n- ")
                             ),
-                            images: vec![],
                         });
                         last_errors = errors;
                     }
                 }
             }
             Err(parse_error) => {
-                messages.push(greentic_llm::ChatMessage {
-                    role: greentic_llm::MessageRole::User,
+                messages.push(WireChatMessage {
+                    role: WireRole::User,
                     content: format!(
                         "{parse_error}\nRespond again using the emit_answers or follow_up tool."
                     ),
-                    images: vec![],
                 });
                 last_errors = vec![parse_error];
             }
@@ -80,17 +84,15 @@ pub fn infer_capability_answers(
 /// SoRLa catalog — the classification is between named capabilities and the
 /// catalog only adds noise and prompt-injection surface.
 pub fn classify_capability(chat: &dyn ChatFn, intent: &str) -> OperalaResult<Option<String>> {
-    let request = greentic_llm::ChatRequest {
+    let request = WireChatRequest {
         messages: vec![
-            greentic_llm::ChatMessage {
-                role: greentic_llm::MessageRole::System,
+            WireChatMessage {
+                role: WireRole::System,
                 content: "Classify the operator intent into one operational capability. Respond with ONLY a JSON object: {\"capability\": \"reconciliation\"} or {\"capability\": \"bulk_ingest\"} or {\"capability\": \"unknown\"}.".into(),
-                images: vec![],
             },
-            greentic_llm::ChatMessage {
-                role: greentic_llm::MessageRole::User,
+            WireChatMessage {
+                role: WireRole::User,
                 content: format!("Operator intent: {intent}"),
-                images: vec![],
             },
         ],
         tools: vec![],
@@ -264,12 +266,11 @@ impl LlmRuntime {
 }
 
 /// Test seam: session functions take `&dyn ChatFn` so tests inject the
-/// scripted mock without a real backend or runtime.
+/// scripted mock without a real backend or runtime. Implementors receive
+/// backend-agnostic wire types; `LlmRuntime` converts to/from greentic-llm
+/// at its own boundary.
 pub trait ChatFn {
-    fn chat(
-        &self,
-        request: greentic_llm::ChatRequest,
-    ) -> Result<greentic_llm::ChatResponse, greentic_llm::LlmError>;
+    fn chat(&self, request: WireChatRequest) -> Result<WireChatResponse, WireChatError>;
 
     /// Whether the underlying provider supports native tool calling.
     /// Defaults to true; `LlmRuntime` reports the real capability.
@@ -279,11 +280,12 @@ pub trait ChatFn {
 }
 
 impl ChatFn for LlmRuntime {
-    fn chat(
-        &self,
-        request: greentic_llm::ChatRequest,
-    ) -> Result<greentic_llm::ChatResponse, greentic_llm::LlmError> {
-        LlmRuntime::chat(self, request)
+    fn chat(&self, request: WireChatRequest) -> Result<WireChatResponse, WireChatError> {
+        let llm_request = wire_request_to_llm(request);
+        let llm_response = LlmRuntime::chat(self, llm_request).map_err(|err| WireChatError {
+            message: err.to_string(),
+        })?;
+        Ok(llm_response_to_wire(llm_response))
     }
 
     fn tools_supported(&self) -> bool {
@@ -291,22 +293,84 @@ impl ChatFn for LlmRuntime {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Conversion helpers — live next to LlmRuntime, stay native-only.
+// ---------------------------------------------------------------------------
+
+fn wire_request_to_llm(request: WireChatRequest) -> greentic_llm::ChatRequest {
+    greentic_llm::ChatRequest {
+        messages: request
+            .messages
+            .into_iter()
+            .map(|message| greentic_llm::ChatMessage {
+                role: wire_role_to_llm(message.role),
+                content: message.content,
+                images: vec![],
+            })
+            .collect(),
+        tools: request
+            .tools
+            .into_iter()
+            .map(|tool| greentic_llm::ToolDef {
+                name: tool.name,
+                description: tool.description,
+                schema: tool.parameters,
+            })
+            .collect(),
+        tool_choice: request.tool_choice,
+        max_tokens: request.max_tokens,
+        temperature: request.temperature,
+    }
+}
+
+fn wire_role_to_llm(role: WireRole) -> greentic_llm::MessageRole {
+    match role {
+        WireRole::System => greentic_llm::MessageRole::System,
+        WireRole::User => greentic_llm::MessageRole::User,
+        WireRole::Assistant => greentic_llm::MessageRole::Assistant,
+        WireRole::Tool => greentic_llm::MessageRole::Tool,
+    }
+}
+
+fn llm_response_to_wire(response: greentic_llm::ChatResponse) -> WireChatResponse {
+    WireChatResponse {
+        content: response.content,
+        tool_calls: response
+            .tool_calls
+            .into_iter()
+            .map(|call| WireToolCall {
+                name: call.name,
+                arguments: call.arguments,
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests_support {
-    use super::ChatFn;
+    use super::{ChatFn, WireChatError, WireChatRequest, WireChatResponse};
     use greentic_llm::mock::{TestLlmProvider, TestLlmProviderBuilder};
     use greentic_llm::{ChatResponse, FinishReason, ToolCall};
 
-    /// Test ChatFn backed by the scripted mock. Sync-only: owns its own current-thread runtime, so it must not be driven from inside an existing tokio runtime.
+    /// Test ChatFn backed by the scripted mock. Sync-only: owns its own
+    /// current-thread runtime, so it must not be driven from inside an
+    /// existing tokio runtime.
+    ///
+    /// The mock still stores `greentic_llm::ChatResponse` internally; this
+    /// adapter converts wire request → llm request → scripted llm response →
+    /// wire response so the inference pipeline sees only wire types.
     pub struct ScriptedChat(TestLlmProvider, tokio::runtime::Runtime);
 
     impl ChatFn for ScriptedChat {
-        fn chat(
-            &self,
-            request: greentic_llm::ChatRequest,
-        ) -> Result<ChatResponse, greentic_llm::LlmError> {
-            self.1
-                .block_on(greentic_llm::LlmProvider::chat(&self.0, request))
+        fn chat(&self, request: WireChatRequest) -> Result<WireChatResponse, WireChatError> {
+            let llm_request = super::wire_request_to_llm(request);
+            let llm_response = self
+                .1
+                .block_on(greentic_llm::LlmProvider::chat(&self.0, llm_request))
+                .map_err(|err| WireChatError {
+                    message: err.to_string(),
+                })?;
+            Ok(super::llm_response_to_wire(llm_response))
         }
     }
 
@@ -324,6 +388,8 @@ pub(crate) mod tests_support {
         )
     }
 
+    /// Build a scripted `ChatResponse` that calls the `emit_answers` tool.
+    /// Returns a `greentic_llm::ChatResponse` so it can be queued into the mock.
     pub fn emit(value: serde_json::Value) -> ChatResponse {
         ChatResponse {
             content: String::new(),
@@ -336,6 +402,7 @@ pub(crate) mod tests_support {
         }
     }
 
+    /// Build a scripted `ChatResponse` that calls the `follow_up` tool.
     pub fn follow_up(question: &str) -> ChatResponse {
         ChatResponse {
             content: String::new(),
