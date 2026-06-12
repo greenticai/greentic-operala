@@ -114,25 +114,22 @@ pub struct UpdateOutcome {
     pub diff: Vec<diff::DiffEntry>,
 }
 
-/// Update mode: regenerate the capability answers via LLM from the existing
-/// document + change instruction; preserve the outer envelope; return the
-/// validated document plus a structural diff for human review.
+/// Contract-first update: regenerate capability answers from a change instruction.
 ///
-/// Requires `native` feature (reads SoRLa from the filesystem).
-#[cfg(feature = "native")]
-pub fn update_answers(
+/// Wasm-safe — the SoRLa contract is already resident in memory; no filesystem
+/// access occurs here. The native [`update_answers`] loads the contract from
+/// disk and then delegates to this function.
+///
+/// Returns a validated [`UpdateOutcome`] containing the updated answers document
+/// and a structural diff for human review.
+pub fn update_answers_for_contract(
     chat: &dyn ChatFn,
+    sorla: &crate::SorlaContract,
     existing: &crate::OperalaAnswers,
-    sorla_path: &str,
     instruction: &str,
 ) -> OperalaResult<UpdateOutcome> {
     use crate::OperaLaExtension;
 
-    let sorla = crate::load_sorla_contract(&crate::SourceRef {
-        kind: crate::SourceKind::File,
-        uri: sorla_path.to_string(),
-        digest: None,
-    })?;
     let (extension_id, schema, existing_value) = match (
         &existing.capability_answers.reconciliation,
         &existing.capability_answers.bulk_ingest,
@@ -156,7 +153,7 @@ pub fn update_answers(
         chat,
         extension_id,
         &schema,
-        &sorla,
+        sorla,
         instruction,
         Some(&existing_value),
     )?;
@@ -174,7 +171,7 @@ pub fn update_answers(
         }
         other => {
             return Err(format!(
-                "internal: unhandled capability '{other}' in update_answers"
+                "internal: unhandled capability '{other}' in update_answers_for_contract"
             ));
         }
     }
@@ -186,6 +183,29 @@ pub fn update_answers(
         answers: updated,
         diff: diff::diff_values(&old_doc, &new_doc),
     })
+}
+
+/// Update mode: regenerate the capability answers via LLM from the existing
+/// document + change instruction; preserve the outer envelope; return the
+/// validated document plus a structural diff for human review.
+///
+/// Requires `native` feature (reads SoRLa from the filesystem).
+/// The LLM-regeneration and structural-diff core lives in the wasm-safe
+/// [`update_answers_for_contract`]; this function only adds the filesystem
+/// contract load.
+#[cfg(feature = "native")]
+pub fn update_answers(
+    chat: &dyn ChatFn,
+    existing: &crate::OperalaAnswers,
+    sorla_path: &str,
+    instruction: &str,
+) -> OperalaResult<UpdateOutcome> {
+    let sorla = crate::load_sorla_contract(&crate::SourceRef {
+        kind: crate::SourceKind::File,
+        uri: sorla_path.to_string(),
+        digest: None,
+    })?;
+    update_answers_for_contract(chat, &sorla, existing, instruction)
 }
 
 /// Test seam: session functions take `&dyn ChatFn` so tests inject the
@@ -504,6 +524,72 @@ mod driver_tests {
         assert_eq!(
             err,
             "follow-up required: Which event is the payment source?"
+        );
+    }
+}
+
+/// Wasm-safe tests: no filesystem access; exercise `update_answers_for_contract`
+/// directly using `parse_sorla_contract` + `include_str!` fixtures. These tests
+/// compile and run under `--no-default-features` and `wasm32-wasip2`.
+#[cfg(test)]
+mod wasm_safe_update_tests {
+    use super::*;
+    use tests_support::{emit, scripted_chat};
+
+    fn fixture_sorla_contract() -> crate::SorlaContract {
+        crate::parse_sorla_contract(include_str!(
+            "../../extensions/reconciliation/examples/tenancy/sorla.yaml"
+        ))
+        .expect("fixture sorla parses")
+    }
+
+    fn fixture_existing_answers() -> crate::OperalaAnswers {
+        serde_json::from_str(include_str!(
+            "../../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse")
+    }
+
+    /// Mirror of `update_mode_changes_only_the_instructed_field` in lib.rs, but
+    /// calls the wasm-safe `update_answers_for_contract` directly — no native
+    /// feature, no filesystem contract load.
+    #[test]
+    fn update_answers_for_contract_changes_only_the_instructed_field() {
+        let sorla = fixture_sorla_contract();
+        let existing = fixture_existing_answers();
+
+        let mut updated_value =
+            serde_json::to_value(existing.capability_answers.reconciliation.clone().unwrap())
+                .unwrap();
+        updated_value["matching"]["amount_tolerance"] = serde_json::json!(5.0);
+        let chat = scripted_chat(vec![emit(updated_value)]);
+
+        let outcome = update_answers_for_contract(
+            &chat,
+            &sorla,
+            &existing,
+            "raise the amount tolerance to 5",
+        )
+        .expect("wasm-safe update succeeds");
+
+        let updated_reconciliation = outcome
+            .answers
+            .capability_answers
+            .reconciliation
+            .as_ref()
+            .expect("reconciliation capability answers present");
+        assert_eq!(updated_reconciliation.matching.amount_tolerance, 5.0);
+        // Outer envelope must be preserved.
+        assert_eq!(outcome.answers.tenant, existing.tenant);
+        assert_eq!(outcome.answers.outputs.work_dir, existing.outputs.work_dir);
+        // Structural diff must name the changed field.
+        assert!(
+            outcome
+                .diff
+                .iter()
+                .any(|e| e.path == "capability_answers.reconciliation.matching.amount_tolerance"),
+            "expected diff entry for amount_tolerance, got: {:?}",
+            outcome.diff
         );
     }
 }
