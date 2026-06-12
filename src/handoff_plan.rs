@@ -7,7 +7,6 @@
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use sha2::Digest as _;
 
 /// A single file entry in the in-memory handoff plan.
 ///
@@ -120,18 +119,13 @@ pub fn build_handoff_plan(
 ///
 /// Computes the SHA-256 of `bytes` and base64-encodes the content.
 fn plan_entry(path: &str, bytes: &[u8]) -> PlanEntry {
-    let digest = sha256_hex(bytes);
+    let digest = crate::sha256_hex(bytes);
     let content_base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
     PlanEntry {
         path: path.to_string(),
         sha256: digest,
         content_base64,
     }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let result = sha2::Sha256::digest(bytes);
-    result.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
@@ -153,7 +147,7 @@ mod tests {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&entry.content_base64)
                 .unwrap();
-            let digest = sha256_hex(&bytes);
+            let digest = crate::sha256_hex(&bytes);
             assert_eq!(digest, entry.sha256, "entry {} hash mismatch", entry.path);
             assert!(
                 !entry.path.starts_with('/') && !entry.path.contains(".."),
@@ -219,7 +213,7 @@ mod tests {
             .decode(&entry.content_base64)
             .expect("base64 decodes");
         assert_eq!(decoded, content);
-        let expected = sha256_hex(content);
+        let expected = crate::sha256_hex(content);
         assert_eq!(entry.sha256, expected);
         assert_eq!(entry.path, "test/hello.txt");
     }

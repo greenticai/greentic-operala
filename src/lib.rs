@@ -2219,7 +2219,7 @@ fn write_yaml_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaR
     fs::write(path, text).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -2959,16 +2959,19 @@ mod tests {
 
     /// Native single-source-of-truth assertion: the `write_operala_gtpack` asset
     /// set must be a superset of the in-memory `build_handoff_plan` entry paths,
-    /// and the handoff JSON bytes must be byte-identical between both paths.
+    /// and every asset's content must match byte-for-byte between the plan and the
+    /// archive — except for `operala-handoff.json` and `operala.yaml` where only
+    /// `sorla.source.uri` is allowed to differ (wasm-safe path leaves it empty;
+    /// native wizard fills it in from the resolved filesystem URI). All other fields
+    /// on those documents, and every byte of every other asset, must be identical.
     ///
-    /// This test guards the invariant without forcing `write_operala_gtpack` to
-    /// consume `build_handoff_plan` (the pack builder's `FlowBundle` + blake3
-    /// path is incompatible with raw byte entries, making a full refactor
-    /// invasive). If the native writer ever drifts from the plan, this test
-    /// catches it immediately.
+    /// Template drift between `src/handoff_plan.rs` and `write_operala_gtpack`
+    /// will now fail immediately rather than passing silently.
     #[cfg(feature = "native")]
     #[test]
     fn gtpack_writer_is_consistent_with_build_handoff_plan() {
+        use base64::Engine as _;
+
         let yaml = include_str!("../extensions/reconciliation/examples/tenancy/sorla.yaml");
         let sorla = parse_sorla_contract(yaml).expect("sorla parses");
         let mut answers: OperalaAnswers = serde_json::from_str(include_str!(
@@ -2983,7 +2986,7 @@ mod tests {
         answers.outputs.handoff_path = Some(root.join("work").join("operala-handoff.json"));
         answers.outputs.gtpack_path = Some(root.join("pack.gtpack"));
 
-        // Build the in-memory plan.
+        // Build the in-memory plan — wasm-safe, no I/O.
         let plan = build_handoff_plan(&sorla, &answers).expect("in-memory plan builds");
 
         // Run the native wizard to write the pack.
@@ -2992,65 +2995,83 @@ mod tests {
         let pack_file = fs::File::open(&pack_path).expect("pack file exists");
         let mut archive = zip::ZipArchive::new(pack_file).expect("pack is a zip archive");
 
-        // Every plan entry must have a corresponding `assets/<path>` entry in the
-        // archive (the pack builder prefixes asset paths with `assets/`).
+        // Null out `sorla.source.uri` on a JSON Value in-place so that the
+        // intentional wasm-safe vs. native difference does not block comparison.
+        fn erase_sorla_source_uri(value: &mut Value) {
+            if let Some(uri) = value
+                .get_mut("sorla")
+                .and_then(|sorla| sorla.get_mut("source"))
+                .and_then(|source| source.get_mut("uri"))
+            {
+                *uri = Value::String(String::new());
+            }
+        }
+
+        // For every plan entry verify it exists in the archive and that its
+        // content matches. Documents (`operala-handoff.json`, `operala.yaml`)
+        // receive semantic comparison after nulling `sorla.source.uri`; all
+        // other files must be byte-identical.
         for entry in &plan.pack_entries {
             let archive_path = format!("assets/{}", entry.path);
-            assert!(
-                archive.by_name(&archive_path).is_ok(),
-                "archive must contain plan entry `{archive_path}`"
-            );
+            let mut archive_entry = archive
+                .by_name(&archive_path)
+                .unwrap_or_else(|_| panic!("archive must contain plan entry `{archive_path}`"));
+
+            let mut archive_bytes = Vec::new();
+            std::io::Read::read_to_end(&mut archive_entry, &mut archive_bytes)
+                .expect("reads archive entry");
+            drop(archive_entry);
+
+            let plan_bytes = base64::engine::general_purpose::STANDARD
+                .decode(&entry.content_base64)
+                .unwrap_or_else(|_| panic!("base64 decodes for `{}`", entry.path));
+
+            if entry.path == "operala/operala-handoff.json" {
+                // Full deep-equality after nulling the intentionally-differing URI.
+                let mut plan_json: Value = serde_json::from_slice(&plan_bytes)
+                    .unwrap_or_else(|_| panic!("`{}` plan bytes parse as JSON", entry.path));
+                let mut archive_json: Value = serde_json::from_slice(&archive_bytes)
+                    .unwrap_or_else(|_| panic!("`{}` archive bytes parse as JSON", entry.path));
+
+                erase_sorla_source_uri(&mut plan_json);
+                erase_sorla_source_uri(&mut archive_json);
+
+                assert_eq!(
+                    plan_json, archive_json,
+                    "`{}` must be fully equal between plan and archive (after nulling sorla.source.uri)",
+                    entry.path
+                );
+            } else if entry.path == "operala/operala.yaml" {
+                // Parse YAML on both sides into a canonical JSON Value for deep
+                // comparison; nulling `sorla.source.uri` applies here too.
+                // serde_yaml can deserialize directly into serde_json::Value.
+                let mut plan_val: Value =
+                    serde_yaml::from_slice(&plan_bytes).unwrap_or_else(|err| {
+                        panic!("`{}` plan bytes must parse as YAML: {err}", entry.path)
+                    });
+                let mut archive_val: Value =
+                    serde_yaml::from_slice(&archive_bytes).unwrap_or_else(|err| {
+                        panic!("`{}` archive bytes must parse as YAML: {err}", entry.path)
+                    });
+
+                erase_sorla_source_uri(&mut plan_val);
+                erase_sorla_source_uri(&mut archive_val);
+
+                assert_eq!(
+                    plan_val, archive_val,
+                    "`{}` must be fully equal between plan and archive (after nulling sorla.source.uri)",
+                    entry.path
+                );
+            } else {
+                // All other assets (flow stubs, schema files, etc.) must be
+                // byte-identical — no semantic wiggle room.
+                assert_eq!(
+                    plan_bytes, archive_bytes,
+                    "`{}` bytes must be identical between plan and archive",
+                    entry.path
+                );
+            }
         }
-
-        // The handoff JSON capability-specific content must be semantically identical
-        // between the in-memory plan and the archived file. The `sorla.source.uri`
-        // field intentionally differs: the wasm-safe path leaves it empty (no
-        // filesystem access), while the native wizard sets it from the resolved file
-        // path. All other fields must match.
-        use base64::Engine as _;
-        let plan_handoff_entry = plan
-            .pack_entries
-            .iter()
-            .find(|entry| entry.path == "operala/operala-handoff.json")
-            .expect("plan includes operala-handoff.json");
-        let plan_handoff_bytes = base64::engine::general_purpose::STANDARD
-            .decode(&plan_handoff_entry.content_base64)
-            .expect("base64 decodes");
-        let plan_handoff_json: Value =
-            serde_json::from_slice(&plan_handoff_bytes).expect("plan handoff parses as json");
-
-        let mut archive_entry = archive
-            .by_name("assets/operala/operala-handoff.json")
-            .expect("archive has operala-handoff.json");
-        let mut archive_handoff_bytes = Vec::new();
-        std::io::Read::read_to_end(&mut archive_entry, &mut archive_handoff_bytes)
-            .expect("reads archive entry");
-        let archive_handoff_json: Value =
-            serde_json::from_slice(&archive_handoff_bytes).expect("archive handoff parses as json");
-
-        // Capability bindings, flows, schemas, and extension metadata must match.
-        for key in [
-            "schema",
-            "capability",
-            "extension",
-            "input_modes",
-            "bindings",
-            "flows",
-            "schemas",
-        ] {
-            assert_eq!(
-                plan_handoff_json[key], archive_handoff_json[key],
-                "handoff field `{key}` must match between plan and archive"
-            );
-        }
-        // The sorla digest must match (proves same contract was used).
-        assert_eq!(
-            plan_handoff_json["sorla"]["source_digest"],
-            archive_handoff_json["sorla"]["source_digest"],
-            "sorla source_digest must match"
-        );
-        // Note: sorla.source.uri intentionally differs — wasm-safe path is empty,
-        // native path is the resolved filesystem URI. This is by design.
 
         let _ = fs::remove_dir_all(root);
     }
