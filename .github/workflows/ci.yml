@@ -47,3 +47,33 @@ jobs:
       - name: Run local check
         working-directory: greentic-operala
         run: bash ci/local_check.sh
+
+  wasm-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout OperaLa
+        uses: actions/checkout@v4
+        with:
+          path: greentic-operala
+      - name: Checkout Greentic Pack
+        uses: actions/checkout@v4
+        with:
+          repository: greenticai/greentic-pack
+          path: greentic-pack
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            greentic-operala
+            greentic-pack
+      - name: Check extension (wasm32-wasip2, no default features)
+        working-directory: greentic-operala
+        run: cargo check --no-default-features --target wasm32-wasip2
+      - name: Build extension WASM component
+        working-directory: greentic-operala
+        run: cargo build -p greentic-operala-designer-extension --target wasm32-wasip2 --release
+      - name: Test extension (host target, no default features)
+        working-directory: greentic-operala
+        run: cargo test --no-default-features

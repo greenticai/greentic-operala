@@ -1,16 +1,24 @@
+#[cfg(feature = "native")]
 use clap::{Args, Parser, Subcommand};
+#[cfg(feature = "native")]
 use greentic_pack::builder::{
     FlowBundle, PACK_VERSION, PackBuilder, PackMeta, Provenance, Signing,
 };
+#[cfg(feature = "native")]
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+#[cfg(feature = "native")]
 use std::env;
+#[cfg(feature = "native")]
 use std::ffi::OsString;
+#[cfg(feature = "native")]
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "native")]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[path = "../extensions/bulk-ingest/mod.rs"]
 mod bulk_ingest;
@@ -19,7 +27,9 @@ mod embedded_i18n {
     include!(concat!(env!("OUT_DIR"), "/embedded_i18n.rs"));
 }
 
+pub mod handoff_plan;
 pub mod inference;
+pub use handoff_plan::{HandoffPlan, PlanEntry, build_handoff_plan};
 
 pub type OperalaResult<T> = Result<T, String>;
 
@@ -29,6 +39,7 @@ pub const READINESS_SCHEMA: &str = "greentic.operala.readiness.v1";
 pub const EXTENSION_RECONCILIATION: &str = "greentic.operala.reconciliation.v1";
 pub const EXTENSION_BULK_INGEST: &str = "greentic.operala.bulk_ingest.v1";
 
+#[cfg(feature = "native")]
 const WIZARD_STAGES: &[&str] = &[
     "load_answers",
     "resolve_sorla",
@@ -40,6 +51,7 @@ const WIZARD_STAGES: &[&str] = &[
     "write_reports",
 ];
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone)]
 pub enum ResolvedArtifact {
     LocalPath(PathBuf),
@@ -48,6 +60,7 @@ pub enum ResolvedArtifact {
     Yaml(serde_yaml::Value),
 }
 
+#[cfg(feature = "native")]
 #[allow(async_fn_in_trait)]
 pub trait ArtifactResolver {
     async fn resolve(
@@ -58,11 +71,13 @@ pub trait ArtifactResolver {
     ) -> OperalaResult<ResolvedArtifact>;
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone)]
 pub struct LocalCacheArtifactResolver {
     root: PathBuf,
 }
 
+#[cfg(feature = "native")]
 impl LocalCacheArtifactResolver {
     pub fn from_env() -> Self {
         Self {
@@ -102,6 +117,7 @@ impl LocalCacheArtifactResolver {
     }
 }
 
+#[cfg(feature = "native")]
 impl ArtifactResolver for LocalCacheArtifactResolver {
     async fn resolve(
         &self,
@@ -113,6 +129,7 @@ impl ArtifactResolver for LocalCacheArtifactResolver {
     }
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Parser)]
 #[command(name = "greentic-operala")]
 #[command(about = "Author OperaLa operational handoff artifacts")]
@@ -121,12 +138,14 @@ pub struct OperalaCli {
     pub command: OperalaCommand,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Subcommand)]
 pub enum OperalaCommand {
     Prompt(PromptArgs),
     Wizard(WizardArgs),
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Args)]
 pub struct PromptArgs {
     #[arg(long)]
@@ -157,6 +176,7 @@ pub struct PromptArgs {
     pub prompt: String,
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Args)]
 pub struct WizardArgs {
     #[arg(long)]
@@ -754,6 +774,7 @@ fn check_named_or_candidates(
     }
 }
 
+#[cfg(feature = "native")]
 pub fn run_operala_cli() -> std::process::ExitCode {
     let args = env::args_os().collect::<Vec<_>>();
     if let Some(help) = localized_operala_help_for_args(&args) {
@@ -769,6 +790,7 @@ pub fn run_operala_cli() -> std::process::ExitCode {
     }
 }
 
+#[cfg(feature = "native")]
 pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
     match cli.command {
         OperalaCommand::Prompt(args) => {
@@ -849,10 +871,12 @@ pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
     }
 }
 
+#[cfg(feature = "native")]
 pub fn prompt_answers(args: &PromptArgs) -> OperalaResult<OperalaAnswers> {
     prompt_answers_with_llm(args, None)
 }
 
+#[cfg(feature = "native")]
 pub fn prompt_answers_with_llm(
     args: &PromptArgs,
     llm: Option<&dyn inference::ChatFn>,
@@ -862,16 +886,65 @@ pub fn prompt_answers_with_llm(
         uri: args.sorla.clone(),
         digest: None,
     })?;
-    let capability = detect_capability(&args.prompt, llm)?;
+    let mut answers = prompt_answers_for_contract(
+        &sorla,
+        &args.prompt,
+        None,
+        args.locale.as_deref(),
+        args.tenant.as_deref(),
+        args.team.as_deref(),
+        llm,
+    )?;
+    // Override the sorla source URI with the actual file path provided by the caller.
+    // All other output paths are already set correctly by `prompt_answers_for_contract`.
+    answers.sorla.source.uri = args.sorla.clone();
+    Ok(answers)
+}
 
-    let (extension, reconciliation, bulk_ingest, output_name) = match (capability, llm) {
+/// Build [`OperalaAnswers`] from an already-parsed SoRLa contract and a natural-language
+/// prompt, optionally using an LLM for inference.
+///
+/// This is the wasm-safe contract-first entry point. Unlike [`prompt_answers_with_llm`],
+/// it takes an in-memory contract rather than a file path, so it compiles and runs
+/// without filesystem access.
+///
+/// # Parameters
+/// - `sorla` — Parsed SoRLa contract (from [`parse_sorla_contract`] or similar).
+/// - `prompt` — Natural-language operator intent.
+/// - `capability` — Optional explicit capability override. When `None` the
+///   function auto-detects from the prompt keywords or LLM classification.
+/// - `locale` — Optional locale tag (e.g. `"en-GB"`).
+/// - `tenant` — Optional tenant identifier.
+/// - `team` — Optional team identifier.
+/// - `llm` — Optional LLM backend. Pass `None` for the deterministic keyword path.
+///
+/// # Output paths
+/// `outputs.work_dir` is set to `"target/operala/<name>"` as a default placeholder.
+/// The caller (e.g. the native `prompt_answers_with_llm`) may override it after the
+/// fact. In a wasm host the caller typically ignores `outputs` entirely and uses
+/// only the capability answers.
+pub fn prompt_answers_for_contract(
+    sorla: &SorlaContract,
+    prompt: &str,
+    capability: Option<&str>,
+    locale: Option<&str>,
+    tenant: Option<&str>,
+    team: Option<&str>,
+    llm: Option<&dyn inference::ChatFn>,
+) -> OperalaResult<OperalaAnswers> {
+    let resolved_capability = match capability {
+        Some(cap) => cap,
+        None => detect_capability(prompt, llm)?,
+    };
+
+    let (extension, reconciliation, bulk_ingest, output_name) = match (resolved_capability, llm) {
         ("reconciliation", Some(chat)) => {
             let value = inference::infer_capability_answers(
                 chat,
                 EXTENSION_RECONCILIATION,
                 &RECONCILIATION_EXTENSION.answers_schema(),
-                &sorla,
-                &args.prompt,
+                sorla,
+                prompt,
                 None,
             )?;
             let reconciliation: ReconciliationAnswers =
@@ -888,8 +961,8 @@ pub fn prompt_answers_with_llm(
                 chat,
                 EXTENSION_BULK_INGEST,
                 &BULK_INGEST_EXTENSION.answers_schema(),
-                &sorla,
-                &args.prompt,
+                sorla,
+                prompt,
                 None,
             )?;
             let bulk: BulkIngestAnswers = serde_json::from_value(value).map_err(to_string)?;
@@ -901,7 +974,7 @@ pub fn prompt_answers_with_llm(
             )
         }
         ("bulk_ingest", None) => {
-            let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
+            let bulk = bulk_ingest::infer_answers(sorla, prompt);
             (
                 EXTENSION_BULK_INGEST.to_string(),
                 None,
@@ -910,7 +983,7 @@ pub fn prompt_answers_with_llm(
             )
         }
         ("reconciliation", None) => {
-            let reconciliation = infer_reconciliation_answers(&sorla)?;
+            let reconciliation = infer_reconciliation_answers(sorla)?;
             (
                 EXTENSION_RECONCILIATION.to_string(),
                 Some(reconciliation.clone()),
@@ -918,27 +991,25 @@ pub fn prompt_answers_with_llm(
                 reconciliation.name.clone(),
             )
         }
-        (other, None) => {
-            return Err(format!("unsupported capability '{other}'"));
-        }
-        (other, Some(_)) => {
-            return Err(format!("unsupported capability '{other}'"));
-        }
+        (other, None) => return Err(format!("unsupported capability '{other}'")),
+        (other, Some(_)) => return Err(format!("unsupported capability '{other}'")),
     };
+
+    // work_dir is a placeholder; native callers override this with a real path.
     let work_dir = PathBuf::from(format!("target/operala/{output_name}"));
     let gtpack_file_name = format!("{}.gtpack", output_name.replace('_', "-"));
     Ok(OperalaAnswers {
         schema: ANSWERS_SCHEMA.to_string(),
-        intent: args.prompt.clone(),
-        detected_capability: Some(capability.to_string()),
+        intent: prompt.to_string(),
+        detected_capability: Some(resolved_capability.to_string()),
         extension,
-        locale: args.locale.clone(),
-        tenant: args.tenant.clone(),
-        team: args.team.clone(),
+        locale: locale.map(str::to_string),
+        tenant: tenant.map(str::to_string),
+        team: team.map(str::to_string),
         sorla: SorlaRef {
             source: SourceRef {
-                kind: SourceKind::File,
-                uri: args.sorla.clone(),
+                kind: sorla.source.kind.clone(),
+                uri: sorla.source.uri.clone(),
                 digest: Some(sorla.source_digest.clone()),
             },
             expected_schema: Some("greentic.sorla.v0.2".to_string()),
@@ -997,6 +1068,7 @@ fn detect_capability(
     ))
 }
 
+#[cfg(feature = "native")]
 pub fn wizard_schema(locale: Option<&str>) -> Value {
     let locale = normalized_locale(locale);
     let registry = ExtensionRegistry::built_in();
@@ -1027,6 +1099,7 @@ pub fn wizard_schema(locale: Option<&str>) -> Value {
     })
 }
 
+#[cfg(feature = "native")]
 pub fn load_answers(reference: &str) -> OperalaResult<OperalaAnswers> {
     let path = resolve_local_path(reference, None, None)?;
     let bytes = fs::read(&path)
@@ -1035,6 +1108,7 @@ pub fn load_answers(reference: &str) -> OperalaResult<OperalaAnswers> {
         .map_err(|err| format!("failed to parse answers {}: {err}", path.display()))
 }
 
+#[cfg(feature = "native")]
 pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
     let state_path = answers.outputs.work_dir.join("operala.state.json");
     let resumed = state_path.exists();
@@ -1355,14 +1429,17 @@ fn require_map_keys(
     Ok(())
 }
 
-pub fn load_sorla_contract(source: &SourceRef) -> OperalaResult<SorlaContract> {
-    let path = resolve_local_path(&source.uri, None, None)?;
-    let raw_yaml = fs::read_to_string(&path)
-        .map_err(|err| format!("failed to read SoRLa source {}: {err}", path.display()))?;
-    let actual_digest = format!("sha256:{}", sha256_hex(raw_yaml.as_bytes()));
-    verify_reference_digest(&source.uri, source.digest.as_deref(), &actual_digest)?;
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&raw_yaml)
-        .map_err(|err| format!("failed to parse SoRLa YAML {}: {err}", path.display()))?;
+/// Parse a SoRLa contract from an in-memory YAML string.
+///
+/// This is the wasm-safe core: no filesystem access. The digest is computed
+/// from the provided bytes so callers receive a consistent `source_digest`.
+/// The `source` field of the returned contract uses a placeholder `SourceRef`
+/// with `SourceKind::File` and an empty URI; callers that have a real source
+/// reference should override it.
+pub fn parse_sorla_contract(yaml_text: &str) -> OperalaResult<SorlaContract> {
+    let actual_digest = format!("sha256:{}", sha256_hex(yaml_text.as_bytes()));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(yaml_text)
+        .map_err(|err| format!("failed to parse SoRLa YAML: {err}"))?;
     let package = yaml
         .get("package")
         .and_then(serde_yaml::Value::as_mapping)
@@ -1371,8 +1448,8 @@ pub fn load_sorla_contract(source: &SourceRef) -> OperalaResult<SorlaContract> {
     let package_version = yaml_string(package, "version").unwrap_or_else(|| "0.1.0".to_string());
     Ok(SorlaContract {
         source: SourceRef {
-            kind: source.kind.clone(),
-            uri: source.uri.clone(),
+            kind: SourceKind::File,
+            uri: String::new(),
             digest: Some(actual_digest.clone()),
         },
         source_digest: actual_digest,
@@ -1382,8 +1459,28 @@ pub fn load_sorla_contract(source: &SourceRef) -> OperalaResult<SorlaContract> {
         events: yaml_named_list(&yaml, "events"),
         actions: yaml_named_list(&yaml, "actions"),
         agent_endpoints: yaml_id_list(&yaml, "agent_endpoints"),
-        raw_yaml,
+        raw_yaml: yaml_text.to_string(),
     })
+}
+
+/// Load a SoRLa contract from the filesystem (native only).
+///
+/// For in-memory parsing without filesystem access, use [`parse_sorla_contract`].
+#[cfg(feature = "native")]
+pub fn load_sorla_contract(source: &SourceRef) -> OperalaResult<SorlaContract> {
+    let path = resolve_local_path(&source.uri, None, None)?;
+    let raw_yaml = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read SoRLa source {}: {err}", path.display()))?;
+    let actual_digest = format!("sha256:{}", sha256_hex(raw_yaml.as_bytes()));
+    verify_reference_digest(&source.uri, source.digest.as_deref(), &actual_digest)?;
+    let mut contract = parse_sorla_contract(&raw_yaml)?;
+    // Override the source ref with the actual resolved source.
+    contract.source = SourceRef {
+        kind: source.kind.clone(),
+        uri: source.uri.clone(),
+        digest: Some(actual_digest),
+    };
+    Ok(contract)
 }
 
 fn infer_reconciliation_answers(sorla: &SorlaContract) -> OperalaResult<ReconciliationAnswers> {
@@ -1464,11 +1561,26 @@ fn infer_reconciliation_answers(sorla: &SorlaContract) -> OperalaResult<Reconcil
     })
 }
 
-fn follow_up_required(question: &str) -> String {
-    format!("follow-up required: {question}")
+/// Stable prefix marking a recoverable "ask the user" outcome. Consumed by
+/// the designer extension to convert errors into follow-up questions —
+/// do not reword without bumping both sides.
+pub const FOLLOW_UP_PREFIX: &str = "follow-up required:";
+
+/// Returns the follow-up question when `message` is a follow-up marker.
+pub fn as_follow_up(message: &str) -> Option<&str> {
+    message.strip_prefix(FOLLOW_UP_PREFIX).map(str::trim)
 }
 
-fn sorla_patch_proposal(
+fn follow_up_required(question: &str) -> String {
+    format!("{FOLLOW_UP_PREFIX} {question}")
+}
+
+/// Build a SoRLa patch proposal from a readiness report.
+///
+/// Used by the wizard natively and the designer-extension validate tool in wasm.
+/// The proposal is pure JSON construction — no filesystem access — so it is
+/// wasm-safe and compiles without the `native` feature.
+pub fn sorla_patch_proposal(
     readiness: &ReadinessReport,
     sorla: &SorlaContract,
 ) -> OperalaResult<Value> {
@@ -1660,6 +1772,7 @@ fn is_sorla_patch_identifier(value: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
+#[cfg(feature = "native")]
 fn build_lock(
     answers: &OperalaAnswers,
     sorla: &SorlaContract,
@@ -1678,6 +1791,7 @@ fn build_lock(
     }))
 }
 
+#[cfg(feature = "native")]
 fn build_summary(readiness: &ReadinessReport, handoff: &OperaLaHandoff) -> String {
     let locale = None;
     let unresolved = if readiness.missing.is_empty() {
@@ -1710,6 +1824,7 @@ fn build_summary(readiness: &ReadinessReport, handoff: &OperaLaHandoff) -> Strin
     )
 }
 
+#[cfg(feature = "native")]
 fn capability_output_name(answers: &OperalaAnswers, handoff: &OperaLaHandoff) -> String {
     answers
         .capability_answers
@@ -1726,6 +1841,7 @@ fn capability_output_name(answers: &OperalaAnswers, handoff: &OperaLaHandoff) ->
         .unwrap_or_else(|| handoff.capability.clone())
 }
 
+#[cfg(feature = "native")]
 fn write_wizard_state(
     path: &Path,
     status: &str,
@@ -1756,6 +1872,7 @@ fn write_wizard_state(
     )
 }
 
+#[cfg(feature = "native")]
 fn write_handoff_assets(work_dir: &Path, handoff: &OperaLaHandoff) -> OperalaResult<()> {
     write_yaml_file(work_dir.join("operala.yaml"), handoff)?;
     write_json_file(
@@ -1819,6 +1936,7 @@ fn write_handoff_assets(work_dir: &Path, handoff: &OperaLaHandoff) -> OperalaRes
     Ok(())
 }
 
+#[cfg(feature = "native")]
 fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<()> {
     if path.is_file() {
         fs::remove_file(path)
@@ -1952,6 +2070,7 @@ fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<
     Ok(())
 }
 
+#[cfg(feature = "native")]
 fn sanitize_pack_segment(value: &str) -> String {
     let sanitized = value
         .chars()
@@ -2073,6 +2192,7 @@ fn default_true() -> bool {
     true
 }
 
+#[cfg(feature = "native")]
 fn resolve_local_path(
     reference: &str,
     tenant: Option<&str>,
@@ -2087,6 +2207,7 @@ fn resolve_local_path(
     }
 }
 
+#[cfg(feature = "native")]
 fn write_json_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaResult<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -2097,6 +2218,7 @@ fn write_json_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaR
     fs::write(path, bytes).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
+#[cfg(feature = "native")]
 fn write_yaml_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaResult<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -2107,7 +2229,7 @@ fn write_yaml_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaR
     fs::write(path, text).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -2118,6 +2240,7 @@ fn to_string<E: std::fmt::Display>(err: E) -> String {
     err.to_string()
 }
 
+#[cfg(feature = "native")]
 fn has_help(args: &[OsString]) -> bool {
     args.iter().skip(1).any(|arg| {
         let arg = arg.to_string_lossy();
@@ -2125,6 +2248,7 @@ fn has_help(args: &[OsString]) -> bool {
     })
 }
 
+#[cfg(feature = "native")]
 fn explicit_locale_arg(args: &[OsString]) -> Option<String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -2139,6 +2263,7 @@ fn explicit_locale_arg(args: &[OsString]) -> Option<String> {
     None
 }
 
+#[cfg(feature = "native")]
 fn locale_from_args(args: &[OsString]) -> Option<String> {
     explicit_locale_arg(args)
         .or_else(|| env::var("OPERALA_LOCALE").ok())
@@ -2192,6 +2317,7 @@ pub fn supported_locales() -> &'static [&'static str] {
     embedded_i18n::supported_locales()
 }
 
+#[cfg(feature = "native")]
 fn text_direction(locale: &str) -> &'static str {
     if locale.starts_with("ar") {
         "rtl"
@@ -2200,6 +2326,7 @@ fn text_direction(locale: &str) -> &'static str {
     }
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperalaHelpCommand {
     Root,
@@ -2207,6 +2334,7 @@ enum OperalaHelpCommand {
     Wizard,
 }
 
+#[cfg(feature = "native")]
 fn localized_operala_help_for_args(args: &[OsString]) -> Option<String> {
     if !has_help(args) {
         return None;
@@ -2219,6 +2347,7 @@ fn localized_operala_help_for_args(args: &[OsString]) -> Option<String> {
     })
 }
 
+#[cfg(feature = "native")]
 fn operala_help_command(args: &[OsString]) -> OperalaHelpCommand {
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -2238,6 +2367,7 @@ fn operala_help_command(args: &[OsString]) -> OperalaHelpCommand {
     OperalaHelpCommand::Root
 }
 
+#[cfg(feature = "native")]
 fn localized_operala_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala <COMMAND>\n\n{commands}:\n  prompt    {prompt}\n  wizard    {wizard}\n\n{options}:\n      --locale <LOCALE>  {locale_option}\n  -h, --help             {help_option}\n",
@@ -2252,6 +2382,7 @@ fn localized_operala_help(locale: Option<&str>) -> String {
     )
 }
 
+#[cfg(feature = "native")]
 fn localized_operala_prompt_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala prompt --sorla <FILE> [OPTIONS] <PROMPT>\n\n{options}:\n      --sorla <FILE>     {sorla_option}\n      --locale <LOCALE>  {locale_option}\n      --output <FILE>    {output_option}\n      --tenant <TENANT>  {tenant_option}\n      --team <TEAM>      {team_option}\n  -h, --help             {help_option}\n",
@@ -2267,6 +2398,7 @@ fn localized_operala_prompt_help(locale: Option<&str>) -> String {
     )
 }
 
+#[cfg(feature = "native")]
 fn localized_operala_wizard_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala wizard [OPTIONS]\n\n{options}:\n      --schema           {schema_option}\n      --answers <REF>    {answers_option}\n      --locale <LOCALE>  {locale_option}\n  -h, --help             {help_option}\n",
@@ -2280,6 +2412,7 @@ fn localized_operala_wizard_help(locale: Option<&str>) -> String {
     )
 }
 
+#[cfg(feature = "native")]
 fn distributed_cache_file_name(reference: &str) -> String {
     let escaped = reference
         .chars()
@@ -2294,17 +2427,20 @@ fn distributed_cache_file_name(reference: &str) -> String {
     format!("{escaped}.json")
 }
 
+#[cfg(feature = "native")]
 fn greentic_qa_engine() -> &'static str {
     let _ = std::any::type_name::<greentic_qa_lib::WizardRunConfig>();
     "greentic-qa-lib"
 }
 
+#[cfg(feature = "native")]
 fn is_distributed_reference(reference: &str) -> bool {
     ["oci://", "store://", "repo://"]
         .iter()
         .any(|scheme| reference.starts_with(scheme))
 }
 
+#[cfg(feature = "native")]
 fn verify_reference_digest(
     reference: &str,
     declared_digest: Option<&str>,
@@ -2336,6 +2472,65 @@ mod tests {
         validate_answers(&answers).expect("fixture answers validate");
     }
 
+    /// Wasm-safe: parses a SoRLa contract from inline YAML without touching
+    /// the filesystem. Exercises the new `parse_sorla_contract` entry point.
+    #[test]
+    fn parse_sorla_contract_from_inline_yaml() {
+        let yaml = include_str!("../extensions/reconciliation/examples/tenancy/sorla.yaml");
+        let contract = parse_sorla_contract(yaml).expect("inline sorla parses");
+        assert!(
+            contract.records.iter().any(|name| name == "RentObligation"),
+            "records should include RentObligation"
+        );
+        assert!(
+            contract.events.iter().any(|name| name == "BankTransaction"),
+            "events should include BankTransaction"
+        );
+        assert!(
+            contract.actions.iter().any(|name| name == "create_payment"),
+            "actions should include create_payment"
+        );
+        assert!(
+            contract
+                .agent_endpoints
+                .iter()
+                .any(|name| name == "create_payment"),
+            "agent_endpoints should include create_payment"
+        );
+        assert!(contract.source_digest.starts_with("sha256:"));
+    }
+
+    /// Wasm-safe: exercises `prompt_answers_for_contract` with an inline-parsed
+    /// SoRLa contract and no LLM (deterministic keyword path).
+    #[test]
+    fn prompt_answers_for_contract_from_inline_sorla() {
+        let yaml = include_str!("../extensions/reconciliation/examples/tenancy/sorla.yaml");
+        let sorla = parse_sorla_contract(yaml).expect("sorla parses");
+        let answers = prompt_answers_for_contract(
+            &sorla,
+            "Set up rent payment reconciliation from bank transactions",
+            None,
+            Some("en-GB"),
+            Some("acme-property"),
+            Some("property-ops"),
+            None,
+        )
+        .expect("contract-first prompt produces answers");
+        assert_eq!(answers.schema, ANSWERS_SCHEMA);
+        assert_eq!(answers.extension, EXTENSION_RECONCILIATION);
+        assert_eq!(
+            answers.detected_capability.as_deref(),
+            Some("reconciliation")
+        );
+        let reconciliation = answers
+            .capability_answers
+            .reconciliation
+            .as_ref()
+            .expect("reconciliation answers present");
+        assert_eq!(reconciliation.source_event, "BankTransaction");
+    }
+
+    #[cfg(feature = "native")]
     #[test]
     fn fixture_sorla_contract_has_reconciliation_parts() {
         let sorla = load_sorla_contract(&SourceRef {
@@ -2355,6 +2550,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn distributed_reference_reports_cache_location() {
         let err = resolve_local_path(
@@ -2367,6 +2563,7 @@ mod tests {
         assert!(err.contains("greentic-distributor-client"));
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn local_cache_resolver_resolves_distributed_reference() {
         let root =
@@ -2386,6 +2583,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn localized_help_uses_requested_locale() {
         let help = localized_operala_help(Some("nl-NL"));
@@ -2393,6 +2591,7 @@ mod tests {
         assert!(help.contains("Commando"));
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn localized_help_accepts_locale_after_help_flag() {
         let root_help = localized_operala_help_for_args(&[
@@ -2520,6 +2719,7 @@ mod tests {
         assert!(err.contains("0 to 100"));
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn prompt_infers_reconciliation_answers_from_payment_language() {
         let answers = prompt_answers(&PromptArgs {
@@ -2563,6 +2763,7 @@ mod tests {
         validate_answers(&answers).expect("prompt answers validate");
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn prompt_reports_follow_up_when_capability_is_unclear() {
         let err = prompt_answers(&PromptArgs {
@@ -2583,6 +2784,19 @@ mod tests {
         assert!(err.contains("follow-up required"));
     }
 
+    #[test]
+    fn as_follow_up_extracts_question() {
+        let message = follow_up_required("Which record stores the payment?");
+        let question = as_follow_up(&message).expect("should be a follow-up marker");
+        assert_eq!(question, "Which record stores the payment?");
+    }
+
+    #[test]
+    fn as_follow_up_returns_none_for_plain_error() {
+        assert!(as_follow_up("some hard error").is_none());
+    }
+
+    #[cfg(feature = "native")]
     #[test]
     fn wizard_schema_exposes_reconciliation_questions() {
         let schema = wizard_schema(Some("en-GB"));
@@ -2613,6 +2827,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn prompt_infers_generic_bulk_ingest_answers() {
         let answers = prompt_answers(&PromptArgs {
@@ -2646,6 +2861,7 @@ mod tests {
         validate_answers(&answers).expect("bulk ingest answers validate");
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn readiness_reports_ready_missing_and_ambiguous_states() {
         let sorla = load_sorla_contract(&SourceRef {
@@ -2710,6 +2926,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn missing_records_generate_additive_sorla_patch_proposal() {
         let sorla = load_sorla_contract(&SourceRef {
@@ -2762,6 +2979,126 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// Native single-source-of-truth assertion: the `write_operala_gtpack` asset
+    /// set must be a superset of the in-memory `build_handoff_plan` entry paths,
+    /// and every asset's content must match byte-for-byte between the plan and the
+    /// archive — except for `operala-handoff.json` and `operala.yaml` where only
+    /// `sorla.source.uri` is allowed to differ (wasm-safe path leaves it empty;
+    /// native wizard fills it in from the resolved filesystem URI). All other fields
+    /// on those documents, and every byte of every other asset, must be identical.
+    ///
+    /// Template drift between `src/handoff_plan.rs` and `write_operala_gtpack`
+    /// will now fail immediately rather than passing silently.
+    #[cfg(feature = "native")]
+    #[test]
+    fn gtpack_writer_is_consistent_with_build_handoff_plan() {
+        use base64::Engine as _;
+
+        let yaml = include_str!("../extensions/reconciliation/examples/tenancy/sorla.yaml");
+        let sorla = parse_sorla_contract(yaml).expect("sorla parses");
+        let mut answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
+        let root = std::env::temp_dir().join(format!(
+            "operala-plan-consistency-test-{}",
+            std::process::id()
+        ));
+        answers.outputs.work_dir = root.join("work");
+        answers.outputs.handoff_path = Some(root.join("work").join("operala-handoff.json"));
+        answers.outputs.gtpack_path = Some(root.join("pack.gtpack"));
+
+        // Build the in-memory plan — wasm-safe, no I/O.
+        let plan = build_handoff_plan(&sorla, &answers).expect("in-memory plan builds");
+
+        // Run the native wizard to write the pack.
+        run_wizard(&answers).expect("native wizard runs");
+        let pack_path = root.join("pack.gtpack");
+        let pack_file = fs::File::open(&pack_path).expect("pack file exists");
+        let mut archive = zip::ZipArchive::new(pack_file).expect("pack is a zip archive");
+
+        // Null out `sorla.source.uri` on a JSON Value in-place so that the
+        // intentional wasm-safe vs. native difference does not block comparison.
+        fn erase_sorla_source_uri(value: &mut Value) {
+            if let Some(uri) = value
+                .get_mut("sorla")
+                .and_then(|sorla| sorla.get_mut("source"))
+                .and_then(|source| source.get_mut("uri"))
+            {
+                *uri = Value::String(String::new());
+            }
+        }
+
+        // For every plan entry verify it exists in the archive and that its
+        // content matches. Documents (`operala-handoff.json`, `operala.yaml`)
+        // receive semantic comparison after nulling `sorla.source.uri`; all
+        // other files must be byte-identical.
+        for entry in &plan.pack_entries {
+            let archive_path = format!("assets/{}", entry.path);
+            let mut archive_entry = archive
+                .by_name(&archive_path)
+                .unwrap_or_else(|_| panic!("archive must contain plan entry `{archive_path}`"));
+
+            let mut archive_bytes = Vec::new();
+            std::io::Read::read_to_end(&mut archive_entry, &mut archive_bytes)
+                .expect("reads archive entry");
+            drop(archive_entry);
+
+            let plan_bytes = base64::engine::general_purpose::STANDARD
+                .decode(&entry.content_base64)
+                .unwrap_or_else(|_| panic!("base64 decodes for `{}`", entry.path));
+
+            if entry.path == "operala/operala-handoff.json" {
+                // Full deep-equality after nulling the intentionally-differing URI.
+                let mut plan_json: Value = serde_json::from_slice(&plan_bytes)
+                    .unwrap_or_else(|_| panic!("`{}` plan bytes parse as JSON", entry.path));
+                let mut archive_json: Value = serde_json::from_slice(&archive_bytes)
+                    .unwrap_or_else(|_| panic!("`{}` archive bytes parse as JSON", entry.path));
+
+                erase_sorla_source_uri(&mut plan_json);
+                erase_sorla_source_uri(&mut archive_json);
+
+                assert_eq!(
+                    plan_json, archive_json,
+                    "`{}` must be fully equal between plan and archive (after nulling sorla.source.uri)",
+                    entry.path
+                );
+            } else if entry.path == "operala/operala.yaml" {
+                // Parse YAML on both sides into a canonical JSON Value for deep
+                // comparison; nulling `sorla.source.uri` applies here too.
+                // serde_yaml can deserialize directly into serde_json::Value.
+                let mut plan_val: Value =
+                    serde_yaml::from_slice(&plan_bytes).unwrap_or_else(|err| {
+                        panic!("`{}` plan bytes must parse as YAML: {err}", entry.path)
+                    });
+                let mut archive_val: Value =
+                    serde_yaml::from_slice(&archive_bytes).unwrap_or_else(|err| {
+                        panic!("`{}` archive bytes must parse as YAML: {err}", entry.path)
+                    });
+
+                erase_sorla_source_uri(&mut plan_val);
+                erase_sorla_source_uri(&mut archive_val);
+
+                assert_eq!(
+                    plan_val, archive_val,
+                    "`{}` must be fully equal between plan and archive (after nulling sorla.source.uri)",
+                    entry.path
+                );
+            } else {
+                // All other assets (flow stubs, schema files, etc.) must be
+                // byte-identical — no semantic wiggle room.
+                assert_eq!(
+                    plan_bytes, archive_bytes,
+                    "`{}` bytes must be identical between plan and archive",
+                    entry.path
+                );
+            }
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "native")]
     #[test]
     fn wizard_writes_resumable_state_and_summary() {
         let mut answers: OperalaAnswers = serde_json::from_str(include_str!(
@@ -2850,6 +3187,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn registry_finds_reconciliation_and_localizes_unknown_extension() {
         let registry = ExtensionRegistry::built_in();
@@ -2870,6 +3208,7 @@ mod tests {
         assert!(err.contains("Onbekende OperaLa-extensie"));
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn prompt_args_parse_llm_flags() {
         use clap::Parser;
@@ -2952,6 +3291,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn llm_backed_prompt_produces_validated_answers() {
         let answers_value: serde_json::Value = {
@@ -2991,6 +3331,7 @@ mod tests {
         validate_answers(&answers).expect("llm answers validate");
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn no_llm_path_is_byte_identical_to_legacy_keyword_path() {
         let args = PromptArgs {
@@ -3014,6 +3355,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn update_mode_changes_only_the_instructed_field() {
         let existing: OperalaAnswers = serde_json::from_str(include_str!(
@@ -3057,14 +3399,14 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn llm_classifier_fallback_routes_non_keyword_prompt() {
         // Plain-content classification response (classifier reads message content).
-        fn classify(content: &str) -> greentic_llm::ChatResponse {
-            greentic_llm::ChatResponse {
+        fn classify(content: &str) -> inference::WireChatResponse {
+            inference::WireChatResponse {
                 content: content.into(),
                 tool_calls: vec![],
-                finish_reason: greentic_llm::FinishReason::Stop,
             }
         }
         let recon_value: serde_json::Value = {
@@ -3104,6 +3446,7 @@ mod tests {
         validate_answers(&answers).expect("validates");
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn llm_bulk_ingest_new_mode_produces_validated_answers() {
         let bulk_value = serde_json::json!({
@@ -3141,5 +3484,39 @@ mod tests {
             .expect("nested bulk");
         assert!(!bulk.record_collections.is_empty());
         validate_answers(&answers).expect("validates");
+    }
+
+    /// Wasm-safe: exercises `sorla_patch_proposal` without filesystem access.
+    ///
+    /// Constructs a `ReadinessReport` with a missing settlement record (mimicking a
+    /// SoRLa contract that lacks the `Payment` record) and verifies that
+    /// `sorla_patch_proposal` returns a proposal that names the missing record.
+    #[test]
+    fn sorla_patch_proposal_names_missing_record_in_wasm_safe_path() {
+        let sorla = parse_sorla_contract(include_str!(
+            "../extensions/reconciliation/examples/tenancy/sorla.yaml"
+        ))
+        .expect("fixture sorla parses");
+
+        let readiness = ReadinessReport {
+            schema: "greentic.operala.readiness.v1".to_string(),
+            capability: EXTENSION_RECONCILIATION.to_string(),
+            status: ReadinessStatus::NeedsSorlaChanges,
+            found: Default::default(),
+            missing: vec![
+                "settlement_record `MissingPayment` not found in SoRLa records".to_string(),
+            ],
+            warnings: vec![],
+            summary: "missing settlement record".to_string(),
+        };
+
+        let proposal = sorla_patch_proposal(&readiness, &sorla)
+            .expect("patch proposal builds from wasm-safe path");
+        assert_eq!(proposal["schema"], "greentic.sorla.patch.v1");
+        assert_eq!(proposal["status"], "proposed");
+        let operations = proposal["operations"].as_array().expect("operations array");
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0]["op"], "add_record");
+        assert_eq!(operations[0]["record"]["requested_name"], "MissingPayment");
     }
 }

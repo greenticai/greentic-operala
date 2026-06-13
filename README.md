@@ -157,6 +157,68 @@ bash ci/local_check.sh
 
 The full local check expects `greentic-operax` to be installed on `PATH`.
 
+## Designer Extension
+
+The `greentic.operala` design extension
+(`crates/greentic-operala-designer-extension`) lets the Greentic Designer author
+operational behaviour against a built SoRLa system of record, entirely through
+the conversational composer UI.
+
+### What It Provides
+
+The extension exposes five tools to the designer host:
+
+| Tool | Purpose |
+|------|---------|
+| `list_operala_capabilities` | List all built-in OperaLa capabilities with their answers schemas so the designer can surface the wizard form. |
+| `generate_operala_answers` | Parse a SoRLa YAML string and a natural-language prompt to produce an `answers.json` draft. One clarification round surfaces as a `{ "follow_up": "question" }` envelope; the designer chat loop shows the question and re-invokes the tool with the operator's reply. |
+| `update_operala_answers` | Apply a change instruction (e.g. "raise the tolerance to 5") to existing answers via the host LLM. Returns the updated answers document plus a field-level diff so the designer can show exactly what changed. |
+| `validate_operala_answers` | Check answers against the JSON schema and the SoRLa contract's readiness rules. Returns `{ "valid", "issues", "readiness", "patch_proposal" }` — the patch proposal contains additive SoRLa material the designer can present to the operator when required records, events, actions, or endpoints are missing. |
+| `generate_handoff_pack` | Build the OperaLa handoff plan in memory and return all pack entries (path + sha256 + base64 content). The designer zips these into a `.gtpack` without writing to disk. |
+
+### State And LLM
+
+The extension is **stateless** — all working state (answers, SoRLa YAML, locale,
+tenant/team context) lives in the designer and is passed as arguments on every
+call. There is no server-side session.
+
+LLM inference goes through the host via the `operala_composer` role. The designer
+must grant that role in the extension's runtime permissions; `generate_operala_answers`
+degrades gracefully to the deterministic keyword path when no LLM is present, while
+`update_operala_answers` requires a live LLM and returns a descriptive error
+otherwise.
+
+### Building The WASM Component
+
+```bash
+# Full WASM component (requires cargo-component)
+cargo component build -p greentic-operala-designer-extension --release
+
+# Plain cdylib (wasm32-wasip2, no cargo-component tooling required)
+cargo build -p greentic-operala-designer-extension \
+  --target wasm32-wasip2 --release
+
+# Compile the WASM core without the native CLI (--no-default-features strips the
+# `native` feature that pulls in file I/O and the binary entry-point)
+cargo check -p greentic-operala-designer-extension \
+  --no-default-features --target wasm32-wasip2
+```
+
+The crate exposes two feature gates:
+
+| Feature | Default | Purpose |
+|---------|---------|---------|
+| `native` | yes | Enables the native CLI binary and file-system helpers. Omit this for WASM builds. |
+| *(none)* | — | WASM core only; the component shell is always compiled in. |
+
+### Publishing
+
+The extension is published to `store.greentic.cloud` on release tags (`v*.*.*`).
+The CI workflow in `.github/workflows/release.yml` builds the WASM component,
+packages it with `describe.json`, and uploads the `.gtxpack` to the store. The
+`sha256` fields in `describe.json` are stamped by the release pipeline — the
+placeholder `000…` values in the source tree are intentional.
+
 ## Relationship To Other Greentic Tools
 
 - SoRLa owns system-of-record contracts.
