@@ -101,10 +101,12 @@ fn generate_answers_via_scripted_llm() {
     )
     .unwrap();
 
-    // Must produce either answers or a follow-up question.
+    // The fixture sorla has all required reconciliation records; with the
+    // scripted LLM returning valid answers the pipeline must produce answers,
+    // not a follow-up question.
     assert!(
-        out["answers"].is_object() || out["follow_up"].is_string(),
-        "expected answers or follow_up, got: {out}"
+        out["answers"].is_object(),
+        "expected answers (not follow_up) for fixture sorla+llm path, got: {out}"
     );
 }
 
@@ -122,9 +124,11 @@ fn generate_answers_deterministic_keyword_path() {
     )
     .unwrap();
 
+    // The fixture sorla contains all required records; the keyword path must
+    // resolve deterministically to answers, not a follow-up.
     assert!(
-        out["answers"].is_object() || out["follow_up"].is_string(),
-        "expected answers or follow_up, got: {out}"
+        out["answers"].is_object(),
+        "expected answers (not follow_up) for keyword path, got: {out}"
     );
 }
 
@@ -244,7 +248,7 @@ fn handoff_pack_returns_entries() {
     let answers = fixture_answers_with_uri();
 
     let out = tools::handle(
-        "build_operala_handoff",
+        "generate_handoff_pack",
         json!({
             "sorla_yaml": SORLA_YAML,
             "answers": answers
@@ -260,6 +264,87 @@ fn handoff_pack_returns_entries() {
         out["handoff"]["schema"],
         json!("greentic.operala.handoff.v1"),
         "handoff.schema mismatch, got: {out}"
+    );
+}
+
+/// Verify that validate surfaces `valid:false` and a useful issue when answers
+/// name an extension that does not exist in the built-in registry.
+#[test]
+fn validate_unknown_extension_is_invalid() {
+    let out = tools::handle(
+        "validate_operala_answers",
+        json!({
+            "sorla_yaml": SORLA_YAML,
+            "answers": {
+                "schema": "greentic.operala.answers.v1",
+                "intent": "test intent",
+                "extension": "nope",
+                "sorla": {
+                    "source": { "kind": "file", "uri": "designer://inline" }
+                },
+                "outputs": { "work_dir": "./target" },
+                "capability_answers": {}
+            }
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        out["valid"],
+        json!(false),
+        "expected valid:false for unknown extension `nope`, got: {out}"
+    );
+    let issues = out["issues"].as_array().expect("issues must be an array");
+    assert!(!issues.is_empty(), "issues must not be empty, got: {out}");
+    let first_issue = issues[0].as_str().unwrap_or("");
+    assert!(
+        first_issue.contains("nope"),
+        "issue should name the unknown extension, got: {first_issue}"
+    );
+}
+
+/// Verify that `generate_answers` surfaces a follow-up envelope when the
+/// pipeline cannot determine the capability without operator input.
+///
+/// Uses a minimal SoRLa (no capability keywords, no LLM) so that
+/// `detect_capability` falls through to the "ask the user" branch and emits
+/// a follow-up-required error, which the tool must convert to `{"follow_up":
+/// "..."}` instead of a hard `Err`.
+#[test]
+fn generate_answers_surfaces_follow_up() {
+    // A sorla with no recognisable records — the keyword fast-path won't match
+    // and without an LLM the pipeline must fall back to the follow-up branch.
+    let minimal_sorla = r#"
+package:
+  name: unknown-system
+  version: 0.1.0
+records:
+  - name: Widget
+    source: native
+    fields:
+      - name: id
+        type: uuid
+events: []
+actions: []
+agent_endpoints: []
+"#;
+
+    let out = tools::handle(
+        "generate_operala_answers",
+        json!({
+            "sorla_yaml": minimal_sorla,
+            "prompt": "do something with widgets",
+            "tenant": "demo-tenant"
+        }),
+    )
+    .unwrap();
+
+    let follow_up = out["follow_up"]
+        .as_str()
+        .expect("expected a follow_up question for ambiguous capability, got: {out}");
+    assert!(
+        !follow_up.is_empty(),
+        "follow_up question must not be empty"
     );
 }
 

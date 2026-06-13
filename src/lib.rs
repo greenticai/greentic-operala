@@ -1561,8 +1561,18 @@ fn infer_reconciliation_answers(sorla: &SorlaContract) -> OperalaResult<Reconcil
     })
 }
 
+/// Stable prefix marking a recoverable "ask the user" outcome. Consumed by
+/// the designer extension to convert errors into follow-up questions —
+/// do not reword without bumping both sides.
+pub const FOLLOW_UP_PREFIX: &str = "follow-up required:";
+
+/// Returns the follow-up question when `message` is a follow-up marker.
+pub fn as_follow_up(message: &str) -> Option<&str> {
+    message.strip_prefix(FOLLOW_UP_PREFIX).map(str::trim)
+}
+
 fn follow_up_required(question: &str) -> String {
-    format!("follow-up required: {question}")
+    format!("{FOLLOW_UP_PREFIX} {question}")
 }
 
 /// Build a SoRLa patch proposal from a readiness report.
@@ -2772,6 +2782,18 @@ mod tests {
         .expect_err("unclear prompt should need follow-up");
 
         assert!(err.contains("follow-up required"));
+    }
+
+    #[test]
+    fn as_follow_up_extracts_question() {
+        let message = follow_up_required("Which record stores the payment?");
+        let question = as_follow_up(&message).expect("should be a follow-up marker");
+        assert_eq!(question, "Which record stores the payment?");
+    }
+
+    #[test]
+    fn as_follow_up_returns_none_for_plain_error() {
+        assert!(as_follow_up("some hard error").is_none());
     }
 
     #[cfg(feature = "native")]

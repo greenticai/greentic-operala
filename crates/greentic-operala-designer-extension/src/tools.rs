@@ -19,8 +19,8 @@
 
 use greentic_operala::inference::ChatFn;
 use greentic_operala::{
-    ExtensionRegistry, OperalaAnswers, SorlaContract, build_handoff_plan, parse_sorla_contract,
-    prompt_answers_for_contract, sorla_patch_proposal, validate_answers,
+    ExtensionRegistry, OperalaAnswers, SorlaContract, as_follow_up, build_handoff_plan,
+    parse_sorla_contract, prompt_answers_for_contract, sorla_patch_proposal, validate_answers,
 };
 use serde_json::{Value, json};
 
@@ -91,16 +91,19 @@ pub fn list_tools() -> Vec<DesignerTool> {
             }),
         ),
         tool(
-            "build_operala_handoff",
+            "generate_handoff_pack",
             "Build the OperaLa handoff plan and return in-memory pack entries.",
+            // Identity derives from answers; `package` is accepted for designer
+            // forward-compatibility and silently ignored — the answers document
+            // is the authoritative source for all handoff metadata.
             json!({
                 "type": "object",
                 "required": ["sorla_yaml", "answers"],
                 "properties": {
                     "sorla_yaml": { "type": "string" },
-                    "answers":    { "type": "object" }
-                },
-                "additionalProperties": false
+                    "answers":    { "type": "object" },
+                    "package":    { "type": "object" }
+                }
             }),
         ),
     ]
@@ -134,7 +137,7 @@ pub fn handle_with_llm(name: &str, args: Value, llm: Option<&dyn ChatFn>) -> Res
         "generate_operala_answers" => generate_answers(args, llm),
         "update_operala_answers" => update_answers(args, llm),
         "validate_operala_answers" => validate(args),
-        "build_operala_handoff" => handoff(args),
+        "generate_handoff_pack" => handoff(args),
         other => Err(format!("unknown OperaLa Designer tool `{other}`")),
     }
 }
@@ -180,15 +183,10 @@ fn generate_answers(args: Value, llm: Option<&dyn ChatFn>) -> Result<Value, Stri
 
     match prompt_answers_for_contract(&sorla, prompt, capability, locale, tenant, team, llm) {
         Ok(answers) => Ok(json!({ "answers": answers })),
-        Err(err) if err.starts_with("follow-up required:") => {
-            let question = err
-                .strip_prefix("follow-up required:")
-                .unwrap_or(&err)
-                .trim()
-                .to_string();
-            Ok(json!({ "follow_up": question }))
-        }
-        Err(err) => Err(err),
+        Err(err) => match as_follow_up(&err) {
+            Some(question) => Ok(json!({ "follow_up": question })),
+            None => Err(err),
+        },
     }
 }
 
@@ -232,21 +230,22 @@ fn update_answers(args: Value, llm: Option<&dyn ChatFn>) -> Result<Value, String
                 "diff": diff_values
             }))
         }
-        Err(err) if err.starts_with("follow-up required:") => {
-            let question = err
-                .strip_prefix("follow-up required:")
-                .unwrap_or(&err)
-                .trim()
-                .to_string();
-            Ok(json!({ "follow_up": question }))
-        }
-        Err(err) => Err(err),
+        Err(err) => match as_follow_up(&err) {
+            Some(question) => Ok(json!({ "follow_up": question })),
+            None => Err(err),
+        },
     }
 }
 
 /// `validate_operala_answers` — validate answers against the schema and the
 /// SoRLa contract's readiness checks, and attach a patch proposal when the
 /// contract is missing required records.
+///
+/// Unlike the previous `.ok()` silencing, an unknown `answers.extension` (registry
+/// miss) and `analyse_sorla` failures are now surfaced as `valid: false` with a
+/// descriptive `issues` entry. This matches `run_wizard`'s hard-error behaviour so
+/// the designer can surface a useful diagnostic instead of silently returning
+/// `{valid:true, readiness:null}`.
 fn validate(args: Value) -> Result<Value, String> {
     let sorla_yaml = require_str(&args, "sorla_yaml")?;
     let answers_value = require_object(&args, "answers")?;
@@ -258,49 +257,59 @@ fn validate(args: Value) -> Result<Value, String> {
     let schema_result = validate_answers(&answers);
 
     let registry = ExtensionRegistry::built_in();
-    let readiness_opt = registry
-        .get(&answers.extension)
-        .and_then(|ext| ext.analyse_sorla(&sorla, &answers).ok());
 
+    // Treat an unknown extension as a validation issue rather than silently
+    // yielding `{valid:true, readiness:null}`.
+    let extension_lookup = registry.get(&answers.extension).ok_or_else(|| {
+        format!(
+            "unknown extension `{}`; available: reconciliation, bulk_ingest",
+            answers.extension
+        )
+    });
+
+    // Resolve readiness and patch proposal, collecting any errors as issues.
+    let (readiness_opt, readiness_error_opt) = match extension_lookup {
+        Ok(ext) => match ext.analyse_sorla(&sorla, &answers) {
+            Ok(readiness) => (Some(readiness), None),
+            Err(err) => (None, Some(format!("readiness analysis failed: {err}"))),
+        },
+        Err(err) => (None, Some(err)),
+    };
+
+    // Patch proposal is best-effort and does not affect validity.
+    // `.ok()` is intentional — a failed proposal does not invalidate answers
+    // that are otherwise schema-correct; the issue will be surfaced via readiness.
     let patch_proposal_opt = readiness_opt
         .as_ref()
         .and_then(|readiness| sorla_patch_proposal(readiness, &sorla).ok());
 
-    match schema_result {
-        Ok(()) => {
-            let readiness_json = readiness_opt
-                .as_ref()
-                .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
-                .unwrap_or(Value::Null);
-            let patch_json = patch_proposal_opt
-                .map(|p| serde_json::to_value(p).unwrap_or(Value::Null))
-                .unwrap_or(Value::Null);
-            Ok(json!({
-                "valid": true,
-                "issues": [],
-                "readiness": readiness_json,
-                "patch_proposal": patch_json
-            }))
-        }
-        Err(err) => {
-            let readiness_json = readiness_opt
-                .as_ref()
-                .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
-                .unwrap_or(Value::Null);
-            let patch_json = patch_proposal_opt
-                .map(|p| serde_json::to_value(p).unwrap_or(Value::Null))
-                .unwrap_or(Value::Null);
-            Ok(json!({
-                "valid": false,
-                "issues": [err],
-                "readiness": readiness_json,
-                "patch_proposal": patch_json
-            }))
-        }
+    // Collect all issues in priority order: readiness/registry first, then schema.
+    let mut issues: Vec<String> = Vec::new();
+    if let Some(err) = readiness_error_opt {
+        issues.push(err);
     }
+    if let Err(err) = &schema_result {
+        issues.push(err.clone());
+    }
+
+    let valid = issues.is_empty();
+    let readiness_json = readiness_opt
+        .as_ref()
+        .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
+    let patch_json = patch_proposal_opt
+        .map(|p| serde_json::to_value(p).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
+
+    Ok(json!({
+        "valid": valid,
+        "issues": issues,
+        "readiness": readiness_json,
+        "patch_proposal": patch_json
+    }))
 }
 
-/// `build_operala_handoff` — build the in-memory handoff plan and return the
+/// `generate_handoff_pack` — build the in-memory handoff plan and return the
 /// handoff document plus all pack entries.
 fn handoff(args: Value) -> Result<Value, String> {
     let sorla_yaml = require_str(&args, "sorla_yaml")?;
@@ -377,13 +386,66 @@ mod tests {
         assert!(names.contains(&"generate_operala_answers"));
         assert!(names.contains(&"update_operala_answers"));
         assert!(names.contains(&"validate_operala_answers"));
-        assert!(names.contains(&"build_operala_handoff"));
+        assert!(names.contains(&"generate_handoff_pack"));
     }
 
     #[test]
     fn unknown_tool_is_error() {
         let err = handle("nope", json!({})).unwrap_err();
         assert!(err.contains("nope"));
+    }
+
+    #[test]
+    fn validate_unknown_extension_is_invalid() {
+        // Answers that name a non-existent extension must yield valid:false with
+        // an issue mentioning the unknown extension name — not valid:true with null readiness.
+        static MINIMAL_SORLA: &str = r#"
+package:
+  name: test-system
+  version: 0.1.0
+records:
+  - name: Foo
+    source: native
+    fields:
+      - name: id
+        type: uuid
+events: []
+actions: []
+agent_endpoints: []
+"#;
+        let out = handle(
+            "validate_operala_answers",
+            json!({
+                "sorla_yaml": MINIMAL_SORLA,
+                "answers": {
+                    "schema": "greentic.operala.answers.v1",
+                    "intent": "test intent",
+                    "extension": "nope",
+                    "sorla": {
+                        "source": { "kind": "file", "uri": "designer://inline" }
+                    },
+                    "outputs": { "work_dir": "./target" },
+                    "capability_answers": {}
+                }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            out["valid"],
+            json!(false),
+            "expected valid:false for unknown extension, got: {out}"
+        );
+        let issues = out["issues"].as_array().expect("issues must be an array");
+        assert!(
+            !issues.is_empty(),
+            "issues must not be empty for unknown extension, got: {out}"
+        );
+        let first_issue = issues[0].as_str().unwrap_or("");
+        assert!(
+            first_issue.contains("nope"),
+            "issue should mention the unknown extension name, got: {first_issue}"
+        );
     }
 
     #[test]

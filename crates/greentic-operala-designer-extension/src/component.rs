@@ -31,16 +31,11 @@ impl manifest::Guest for Component {
     }
 
     fn get_offered() -> Vec<types::CapabilityRef> {
-        vec![
-            types::CapabilityRef {
-                id: "greentic:operala/design".to_string(),
-                version: "1.0.0".to_string(),
-            },
-            types::CapabilityRef {
-                id: "greentic:operala/handoff".to_string(),
-                version: "1.0.0".to_string(),
-            },
-        ]
+        // Task 6 declares design only; handoff is not a separate offered capability.
+        vec![types::CapabilityRef {
+            id: "greentic:operala/design".to_string(),
+            version: "1.0.0".to_string(),
+        }]
     }
 
     fn get_required() -> Vec<types::CapabilityRef> {
