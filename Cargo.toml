@@ -1,3 +1,13 @@
+[workspace]
+members = [".", "crates/greentic-operala-designer-extension"]
+resolver = "3"
+
+# The extension contract crate publishes its `1.2.x-research` line via git tags
+# on the designer SDK monorepo rather than crates.io. Redirect the designer
+# extension's dev-dependency pin (`=1.2.7-research`) to the matching tag.
+[patch.crates-io]
+greentic-extension-sdk-contract = { git = "https://github.com/greenticai/greentic-designer-sdk.git", tag = "v1.2.7-research" }
+
 [package]
 name = "greentic-operala"
 version = "0.1.1"

@@ -1,0 +1,41 @@
+[package]
+name = "greentic-operala-designer-extension"
+version = "0.1.1"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/greenticai/greentic-operala"
+homepage = "https://github.com/greenticai/greentic-operala"
+documentation = "https://docs.rs/greentic-operala"
+description = "Designer extension adapter for Greentic OperaLa."
+publish = false
+
+[lib]
+name = "greentic_operala_designer_extension"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+base64 = "0.22"
+greentic-operala = { path = "../..", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wit-bindgen = "0.44"
+wit-bindgen-rt = "0.44"
+
+[dev-dependencies]
+# Validates describe.json against the published extension contract shape.
+# Pinned exactly: the `1.2.x-research` line is pre-release, and a non-exact
+# requirement would resolve forward to any future stable 1.2.0. The workspace
+# root `[patch.crates-io]` redirects this pin to the designer SDK git tag.
+greentic-extension-sdk-contract = "=1.2.7-research"
+
+[package.metadata.component]
+package = "greentic:operala-designer-extension"
+
+[package.metadata.component.target]
+path = "wit"
+world = "design-extension"
+
+[package.metadata.component.target.dependencies]
+"greentic:extension-base"   = { path = "wit-deps/extension-base.wit" }
+"greentic:extension-host"   = { path = "wit-deps/extension-host.wit" }
+"greentic:extension-design" = { path = "wit-deps/extension-design.wit" }
