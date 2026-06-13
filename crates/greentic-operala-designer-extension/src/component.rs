@@ -31,9 +31,16 @@ impl manifest::Guest for Component {
     }
 
     fn get_offered() -> Vec<types::CapabilityRef> {
-        // No capabilities are offered until Task 5 lands the OperaLa tools;
-        // keep this in sync with describe.json when it appears.
-        Vec::new()
+        vec![
+            types::CapabilityRef {
+                id: "greentic:operala/design".to_string(),
+                version: "1.0.0".to_string(),
+            },
+            types::CapabilityRef {
+                id: "greentic:operala/handoff".to_string(),
+                version: "1.0.0".to_string(),
+            },
+        ]
     }
 
     fn get_required() -> Vec<types::CapabilityRef> {
@@ -60,8 +67,9 @@ impl tools::Guest for Component {
                 description: tool.description.to_string(),
                 input_schema_json: tool.input_schema_json,
                 output_schema_json: tool.output_schema_json,
-                // Legacy `none` defaults to `["flow"]` host-side; Task 5
-                // decides the chat-vs-studio split per tool.
+                // All five OperaLa tools are available in both chat and studio
+                // contexts: the designer chat loop calls generate/update/validate
+                // interactively while the studio routes call them directly.
                 capabilities: None,
                 agentic_worker_metadata: None,
             })
@@ -69,26 +77,60 @@ impl tools::Guest for Component {
     }
 
     fn invoke_tool(name: String, args_json: String) -> Result<String, types::ExtensionError> {
-        // Reuse the native JSON dispatch; map the stringly error into the WIT
-        // variant the same way the reference sorla extension does.
-        crate::tools::invoke_tool(&name, &args_json).map_err(types::ExtensionError::InvalidInput)
+        let args: serde_json::Value = serde_json::from_str(&args_json)
+            .map_err(|err| types::ExtensionError::InvalidInput(err.to_string()))?;
+        crate::tools::handle_with_llm(&name, args, Some(&HostLlm))
+            .and_then(|value| serde_json::to_string(&value).map_err(|err| err.to_string()))
+            .map_err(types::ExtensionError::InvalidInput)
     }
 }
 
 // --- extension-design: validation -------------------------------------------
 
 impl validation::Guest for Component {
-    fn validate_content(content_type: String, _content_json: String) -> validation::ValidateResult {
-        // No OperaLa content validators are wired yet (Task 5); reject every
-        // content type explicitly rather than silently passing content.
-        validation::ValidateResult {
-            valid: false,
-            diagnostics: vec![types::Diagnostic {
-                severity: types::Severity::Error,
-                code: "designer.content.unsupported".to_string(),
-                message: format!("unsupported content type `{content_type}`"),
-                path: None,
-            }],
+    fn validate_content(content_type: String, content_json: String) -> validation::ValidateResult {
+        match content_type.as_str() {
+            "application/vnd.greentic.operala.answers+json"
+            | "greentic.operala.answers"
+            | "operala.answers" => {
+                // validate_operala_answers requires sorla_yaml too; without it we
+                // only perform schema validation via serde.
+                match serde_json::from_str::<greentic_operala::OperalaAnswers>(&content_json) {
+                    Ok(answers) => match greentic_operala::validate_answers(&answers) {
+                        Ok(()) => validation::ValidateResult {
+                            valid: true,
+                            diagnostics: vec![],
+                        },
+                        Err(err) => validation::ValidateResult {
+                            valid: false,
+                            diagnostics: vec![types::Diagnostic {
+                                severity: types::Severity::Error,
+                                code: "operala.answers.invalid".to_string(),
+                                message: err,
+                                path: None,
+                            }],
+                        },
+                    },
+                    Err(err) => validation::ValidateResult {
+                        valid: false,
+                        diagnostics: vec![types::Diagnostic {
+                            severity: types::Severity::Error,
+                            code: "operala.answers.parse_error".to_string(),
+                            message: err.to_string(),
+                            path: None,
+                        }],
+                    },
+                }
+            }
+            other => validation::ValidateResult {
+                valid: false,
+                diagnostics: vec![types::Diagnostic {
+                    severity: types::Severity::Error,
+                    code: "designer.content.unsupported".to_string(),
+                    message: format!("unsupported content type `{other}`"),
+                    path: None,
+                }],
+            },
         }
     }
 }
@@ -97,8 +139,18 @@ impl validation::Guest for Component {
 
 impl prompting::Guest for Component {
     fn system_prompt_fragments() -> Vec<prompting::PromptFragment> {
-        // OperaLa prompt fragments land with the Task 5 tool surface.
-        Vec::new()
+        vec![
+            prompting::PromptFragment {
+                section: "operala.principles".to_string(),
+                content_markdown: "When authoring OperaLa answers, bind ONLY to identifiers present in the SoRLa catalog. Use `generate_operala_answers` to produce answers from a natural-language prompt. Use `validate_operala_answers` to check readiness before building a handoff pack.".to_string(),
+                priority: 10,
+            },
+            prompting::PromptFragment {
+                section: "operala.capabilities".to_string(),
+                content_markdown: "OperaLa supports two built-in capabilities: `reconciliation` for matching observed events against expected obligations, and `bulk_ingest` for batch-uploading records. Use `list_operala_capabilities` to inspect their answer schemas.".to_string(),
+                priority: 20,
+            },
+        ]
     }
 }
 
@@ -130,9 +182,6 @@ impl knowledge::Guest for Component {
 /// specs or tool-call results, so [`ChatFn::tools_supported`] reports `false`
 /// and the inference pipeline takes its no-tools fallback. `max_tokens` and
 /// `temperature` likewise have no host-side counterpart and are dropped.
-// Not referenced yet: Task 5 routes the inference-backed tools through this
-// adapter (mirroring sorla's `prompt_llm()` seam).
-#[allow(dead_code)]
 pub struct HostLlm;
 
 impl ChatFn for HostLlm {

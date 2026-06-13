@@ -15,48 +15,6 @@ mod bindings;
 #[cfg(target_arch = "wasm32")]
 mod component;
 
-/// Design-time tool surface. Task 5 fills in the real OperaLa tools; until
-/// then the registry is empty and invocation reports not-yet-implemented so
-/// the component compiles and loads whole.
-pub mod tools {
-    /// Native-side tool definition mirrored into the WIT `tool-definition`
-    /// record by the wasm component shell.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct DesignerTool {
-        pub name: &'static str,
-        pub description: &'static str,
-        pub input_schema_json: String,
-        pub output_schema_json: Option<String>,
-    }
-
-    /// Tools advertised to the designer host. Empty until Task 5 lands the
-    /// OperaLa authoring tools.
-    pub fn list_tools() -> Vec<DesignerTool> {
-        Vec::new()
-    }
-
-    /// Dispatch a tool invocation by name. Every name errors until Task 5
-    /// wires the OperaLa tool implementations in.
-    pub fn invoke_tool(name: &str, _args_json: &str) -> Result<String, String> {
-        Err(format!(
-            "OperaLa designer tool `{name}` is not yet implemented"
-        ))
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn list_tools_is_empty_until_tools_land() {
-            assert!(list_tools().is_empty());
-        }
-
-        #[test]
-        fn invoke_tool_reports_not_yet_implemented() {
-            let error = invoke_tool("generate_operala_answers", "{}").unwrap_err();
-            assert!(error.contains("generate_operala_answers"));
-            assert!(error.contains("not yet implemented"));
-        }
-    }
-}
+/// Design-time tool surface: five OperaLa authoring tools with a stateless
+/// JSON-envelope contract matching the sorla extension convention.
+pub mod tools;
