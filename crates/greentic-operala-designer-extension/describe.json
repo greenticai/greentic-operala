@@ -1,0 +1,56 @@
+{
+  "$schema": "https://store.greentic.cloud/schemas/describe-v2.json",
+  "apiVersion": "greentic.ai/v2",
+  "kind": "DesignExtension",
+  "compat": {
+    "min_designer_version": ">=1.2.0",
+    "min_runner_version": "^0.12.0",
+    "contract_version": "1.2.0"
+  },
+  "metadata": {
+    "id": "greentic.operala",
+    "name": "OperaLa Designer",
+    "version": "0.1.1",
+    "summary": "Author operational behaviour (reconciliation, bulk ingest) against a SoRLa system of record.",
+    "description": "Author operational behaviour (reconciliation, bulk ingest) against a SoRLa system of record.",
+    "author": { "name": "Greentic AI", "email": "team@greentic.ai" },
+    "license": "MIT"
+  },
+  "engine": {
+    "greenticDesigner": ">=1.2.0",
+    "extRuntime": "^1.2.0"
+  },
+  "capabilities": {
+    "offered": [
+      { "id": "greentic:operala/design", "version": "1.0.0" }
+    ],
+    "required": []
+  },
+  "runtime": {
+    "memoryLimitMB": 32,
+    "permissions": {
+      "llmRoles": ["operala_composer"]
+    },
+    "components": {
+      "operala": {
+        "gtpack": {
+          "file": "runtime/component-operala-designer-extension.gtpack",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "pack_id": "greentic.operala",
+          "component_version": "0.1.1"
+        },
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "world": "greentic:operala-designer-extension/design-extension"
+      }
+    }
+  },
+  "contributions": {
+    "tools": [
+      { "name": "list_operala_capabilities", "export": "invoke-tool" },
+      { "name": "generate_operala_answers", "export": "invoke-tool" },
+      { "name": "update_operala_answers", "export": "invoke-tool" },
+      { "name": "validate_operala_answers", "export": "invoke-tool" },
+      { "name": "generate_handoff_pack", "export": "invoke-tool" }
+    ]
+  }
+}
