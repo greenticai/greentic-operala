@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-designer-extension:
+    if: github.ref_type == 'tag'
+    name: Publish designer extension to Greentic Store
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout OperaLa
+        uses: actions/checkout@v4
+        with:
+          path: greentic-operala
+      # The workspace root references greentic-pack via a local path dep
+      # (../greentic-pack/crates/greentic-pack). Cargo resolves path entries at
+      # metadata time even when the dep is optional (behind the `native` feature),
+      # so the sibling checkout is required for the action's cargo invocations.
+      - name: Checkout Greentic Pack
+        uses: actions/checkout@v4
+        with:
+          repository: greenticai/greentic-pack
+          path: greentic-pack
+      - name: Publish to Greentic Store
+        uses: greenticai/greentic-designer-extension-action@v2
+        with:
+          # Pre-release pin for the contract 1.2.x line — exact version required
+          # because cargo `^1.2.0-research` would resolve forward to any future
+          # stable 1.2.0. Mirror this with the dev-dependency pin in
+          # crates/greentic-operala-designer-extension/Cargo.toml.
+          gtdx-version: "=1.2.7-research"
+          manifest: crates/greentic-operala-designer-extension/Cargo.toml
+          store-url: https://store.greentic.cloud
+          store-token: ${{ secrets.GREENTIC_STORE_TOKEN }}
+          version: ${{ github.ref_name }}
+          rust-toolchain: "1.95.0"
+        working-directory: greentic-operala
