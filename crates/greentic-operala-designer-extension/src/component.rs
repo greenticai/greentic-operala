@@ -130,10 +130,7 @@ impl op::inference::ChatFn for HostLlmChat {
         false
     }
 
-    fn chat(
-        &self,
-        request: op::ChatRequest,
-    ) -> Result<op::ChatResponse, op::LlmError> {
+    fn chat(&self, request: op::ChatRequest) -> Result<op::ChatResponse, op::LlmError> {
         let mut system = String::new();
         let mut messages = Vec::new();
 

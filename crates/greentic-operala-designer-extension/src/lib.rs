@@ -249,10 +249,7 @@ impl op::inference::ChatFn for NativeStubChat {
         false
     }
 
-    fn chat(
-        &self,
-        _request: op::ChatRequest,
-    ) -> Result<op::ChatResponse, op::LlmError> {
+    fn chat(&self, _request: op::ChatRequest) -> Result<op::ChatResponse, op::LlmError> {
         Ok(op::ChatResponse {
             content: r#"{"follow_up":"no LLM configured on native; use invoke_tool with a scripted stub"}"#.to_string(),
             tool_calls: vec![],
@@ -286,10 +283,7 @@ mod tests {
             false
         }
 
-        fn chat(
-            &self,
-            _request: op::ChatRequest,
-        ) -> Result<op::ChatResponse, op::LlmError> {
+        fn chat(&self, _request: op::ChatRequest) -> Result<op::ChatResponse, op::LlmError> {
             // VecDeque is behind &self so we use unsafe interior mutability via
             // a RefCell to pop from the front. Alternatively, use a Mutex.
             // For simplicity in tests we just clone the first response each time.
@@ -456,8 +450,7 @@ mod tests {
 
         // metadata.id.
         assert_eq!(
-            v["metadata"]["id"],
-            "greentic.operala",
+            v["metadata"]["id"], "greentic.operala",
             "metadata.id mismatch"
         );
 
@@ -466,7 +459,10 @@ mod tests {
             .as_array()
             .expect("runtime.permissions.llmRoles must be an array");
         assert_eq!(
-            llm_roles.iter().map(|r| r.as_str().unwrap_or("")).collect::<Vec<_>>(),
+            llm_roles
+                .iter()
+                .map(|r| r.as_str().unwrap_or(""))
+                .collect::<Vec<_>>(),
             vec!["operala_composer"],
             "llmRoles must be exactly [\"operala_composer\"]"
         );
