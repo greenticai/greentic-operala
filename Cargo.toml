@@ -18,22 +18,38 @@ bin-dir = "{ name }-v{ version }-{ target }"
 pkg-fmt = "tgz"
 bin = ["greentic-operala"]
 
+[features]
+# default enables CLI binary + native deps (clap, qa-lib)
+default = ["cli"]
+# cli feature gates clap, greentic-qa-lib, and the binary entry-point
+cli = ["dep:clap", "dep:greentic-qa-lib"]
+
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
+# clap: CLI-only; gated behind the `cli` feature
+clap = { version = "4.5", features = ["derive"], optional = true }
 blake3 = "1"
-# greentic-llm published to crates.io; stable 1.0 line.
-greentic-llm = { version = "1.0", features = ["clap"] }
-greentic-pack = { package = "greentic-pack-lib", path = "../greentic-pack/crates/greentic-pack", version = "0.5" }
-greentic-qa-lib = "0.5"
+# greentic-llm: base import (types only); native-target table adds rig + clap features.
+# version 1.0.1 is not yet published; resolved via [patch.crates-io] below during dev.
+greentic-llm = { version = "1.0.1", default-features = false }
+# greentic-pack: base import (types only); native-target table adds native feature.
+greentic-pack = { package = "greentic-pack-lib", path = "../greentic-pack/crates/greentic-pack", version = "0.5", default-features = false }
+# greentic-qa-lib: CLI/native-only wizard runner; gates behind `cli` feature (not wasm-safe).
+greentic-qa-lib = { version = "0.5", optional = true }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.11"
+
+# Native-only heavy dependencies: LLM rig backend, pack native machinery, async runtime.
+# Cargo unions these features with the base [dependencies] entries above.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+greentic-llm = { version = "1.0.1", features = ["rig", "clap"] }
+greentic-pack = { package = "greentic-pack-lib", path = "../greentic-pack/crates/greentic-pack", version = "0.5", features = ["native"] }
 tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
-greentic-llm = { version = "1.0", features = ["test-mock"] }
+greentic-llm = { version = "1.0.1", features = ["test-mock"] }
 zip = "8"
 
 [lib]
@@ -43,6 +59,12 @@ path = "src/lib.rs"
 [[bin]]
 name = "greentic-operala"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [workspace]
 members = ["crates/greentic-operala-designer-extension"]
+
+# DEV-ONLY: remove before PR3 merge — greentic-llm 1.0.1 is unpublished on crates.io;
+# resolves to the local worktree at ~/.cache/gtc-wt/greentic-llm-wasm.
+[patch.crates-io]
+greentic-llm = { path = "../greentic-llm-wasm" }
