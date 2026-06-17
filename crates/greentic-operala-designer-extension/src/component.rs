@@ -132,32 +132,32 @@ impl op::inference::ChatFn for HostLlmChat {
 
     fn chat(
         &self,
-        request: greentic_llm::ChatRequest,
-    ) -> Result<greentic_llm::ChatResponse, greentic_llm::LlmError> {
+        request: op::ChatRequest,
+    ) -> Result<op::ChatResponse, op::LlmError> {
         let mut system = String::new();
         let mut messages = Vec::new();
 
         for m in &request.messages {
             match m.role {
-                greentic_llm::MessageRole::System => {
+                op::MessageRole::System => {
                     if !system.is_empty() {
                         system.push('\n');
                     }
                     system.push_str(&m.content);
                 }
-                greentic_llm::MessageRole::User => {
+                op::MessageRole::User => {
                     messages.push(host_llm::LlmMessage {
                         role: "user".to_string(),
                         content: m.content.clone(),
                     });
                 }
-                greentic_llm::MessageRole::Assistant => {
+                op::MessageRole::Assistant => {
                     messages.push(host_llm::LlmMessage {
                         role: "assistant".to_string(),
                         content: m.content.clone(),
                     });
                 }
-                greentic_llm::MessageRole::Tool => {
+                op::MessageRole::Tool => {
                     messages.push(host_llm::LlmMessage {
                         role: "user".to_string(),
                         content: m.content.clone(),
@@ -174,12 +174,12 @@ impl op::inference::ChatFn for HostLlmChat {
         };
 
         match host_llm::complete(&req) {
-            Ok(r) => Ok(greentic_llm::ChatResponse {
+            Ok(r) => Ok(op::ChatResponse {
                 content: r.content,
                 tool_calls: vec![],
-                finish_reason: greentic_llm::FinishReason::Stop,
+                finish_reason: op::FinishReason::Stop,
             }),
-            Err(e) => Err(greentic_llm::LlmError::Transport(format!(
+            Err(e) => Err(op::LlmError::Transport(format!(
                 "host LLM completion failed: {e}"
             ))),
         }

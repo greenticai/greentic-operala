@@ -1878,7 +1878,6 @@ version = "0.1.0-research"
 dependencies = [
  "base64 0.22.1",
  "greentic-extension-sdk-contract",
- "greentic-llm",
  "greentic-operala",
  "serde",
  "serde_json",

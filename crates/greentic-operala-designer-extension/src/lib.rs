@@ -251,12 +251,12 @@ impl op::inference::ChatFn for NativeStubChat {
 
     fn chat(
         &self,
-        _request: greentic_llm::ChatRequest,
-    ) -> Result<greentic_llm::ChatResponse, greentic_llm::LlmError> {
-        Ok(greentic_llm::ChatResponse {
+        _request: op::ChatRequest,
+    ) -> Result<op::ChatResponse, op::LlmError> {
+        Ok(op::ChatResponse {
             content: r#"{"follow_up":"no LLM configured on native; use invoke_tool with a scripted stub"}"#.to_string(),
             tool_calls: vec![],
-            finish_reason: greentic_llm::FinishReason::Stop,
+            finish_reason: op::FinishReason::Stop,
         })
     }
 }
@@ -270,11 +270,11 @@ mod tests {
     // ── Scripted no-tools ChatFn stub (local, avoids reaching into operala privates) ──
 
     struct ScriptedChat {
-        responses: std::collections::VecDeque<greentic_llm::ChatResponse>,
+        responses: std::collections::VecDeque<op::ChatResponse>,
     }
 
     impl ScriptedChat {
-        fn new(responses: Vec<greentic_llm::ChatResponse>) -> Self {
+        fn new(responses: Vec<op::ChatResponse>) -> Self {
             Self {
                 responses: responses.into(),
             }
@@ -288,8 +288,8 @@ mod tests {
 
         fn chat(
             &self,
-            _request: greentic_llm::ChatRequest,
-        ) -> Result<greentic_llm::ChatResponse, greentic_llm::LlmError> {
+            _request: op::ChatRequest,
+        ) -> Result<op::ChatResponse, op::LlmError> {
             // VecDeque is behind &self so we use unsafe interior mutability via
             // a RefCell to pop from the front. Alternatively, use a Mutex.
             // For simplicity in tests we just clone the first response each time.
@@ -375,10 +375,10 @@ mod tests {
         // ScriptedChat returns the JSON content directly (no tool-calls, tools_supported=false).
         // The inference session will parse `emit_answers` from the content field.
         let content = json!({ "emit_answers": cap_answers }).to_string();
-        let chat = ScriptedChat::new(vec![greentic_llm::ChatResponse {
+        let chat = ScriptedChat::new(vec![op::ChatResponse {
             content,
             tool_calls: vec![],
-            finish_reason: greentic_llm::FinishReason::Stop,
+            finish_reason: op::FinishReason::Stop,
         }]);
         let input = json!({
             "sorla_yaml": yaml,
@@ -401,10 +401,10 @@ mod tests {
         let answers_doc = fixture_answers_value();
         let cap_answers = answers_doc["capability_answers"]["reconciliation"].clone();
         let content = json!({ "emit_answers": cap_answers }).to_string();
-        let chat = ScriptedChat::new(vec![greentic_llm::ChatResponse {
+        let chat = ScriptedChat::new(vec![op::ChatResponse {
             content,
             tool_calls: vec![],
-            finish_reason: greentic_llm::FinishReason::Stop,
+            finish_reason: op::FinishReason::Stop,
         }]);
         let input = json!({
             "sorla_yaml": yaml,
@@ -416,8 +416,8 @@ mod tests {
         match result {
             Ok(v) => {
                 assert!(
-                    v.get("answers").is_some() || v.get("diff").is_some(),
-                    "expected answers+diff, got: {v}"
+                    v.get("answers").is_some() && v.get("diff").is_some(),
+                    "expected both answers and diff, got: {v}"
                 );
             }
             Err(e) => {

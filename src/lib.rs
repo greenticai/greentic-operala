@@ -34,6 +34,11 @@ mod embedded_i18n {
 
 pub mod inference;
 
+/// Re-export the core LLM message types used by `inference::ChatFn`.
+/// Extension crates should import these via `greentic_operala::` rather than
+/// depending on `greentic-llm` directly.
+pub use greentic_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, MessageRole};
+
 pub type OperalaResult<T> = Result<T, String>;
 
 pub const ANSWERS_SCHEMA: &str = "greentic.operala.answers.v1";
