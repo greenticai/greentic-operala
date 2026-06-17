@@ -829,8 +829,7 @@ pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
                     uri: args.sorla.clone(),
                     digest: None,
                 })?;
-                let outcome =
-                    inference::update_answers(chat, &existing, &sorla, &args.prompt)?;
+                let outcome = inference::update_answers(chat, &existing, &sorla, &args.prompt)?;
                 let output = match (&args.output, args.in_place) {
                     (Some(output), _) => output.clone(),
                     (None, true) => existing_path.clone(),
@@ -1406,13 +1405,14 @@ pub fn parse_sorla_contract_from_yaml(raw_yaml: &str) -> OperalaResult<SorlaCont
     Ok(SorlaContract {
         source: SourceRef {
             kind: SourceKind::File,
+            // The in-memory parse path has no URI; `load_sorla_contract`
+            // re-applies the real file URI after delegating here.
             uri: String::new(),
             digest: Some(actual_digest.clone()),
         },
         source_digest: actual_digest,
         package_name: yaml_string(package, "name").unwrap_or_else(|| "unknown".to_string()),
-        package_version: yaml_string(package, "version")
-            .unwrap_or_else(|| "0.1.0".to_string()),
+        package_version: yaml_string(package, "version").unwrap_or_else(|| "0.1.0".to_string()),
         records: yaml_named_list(&yaml, "records"),
         events: yaml_named_list(&yaml, "events"),
         actions: yaml_named_list(&yaml, "actions"),
@@ -2424,10 +2424,8 @@ mod tests {
 
     #[test]
     fn parse_sorla_from_yaml_matches_file_load() {
-        let yaml = std::fs::read_to_string(
-            "extensions/reconciliation/examples/tenancy/sorla.yaml",
-        )
-        .unwrap();
+        let yaml = std::fs::read_to_string("extensions/reconciliation/examples/tenancy/sorla.yaml")
+            .unwrap();
         let parsed = parse_sorla_contract_from_yaml(&yaml).expect("parse");
         assert_eq!(parsed.raw_yaml, yaml);
         assert!(!parsed.records.is_empty());
@@ -3141,13 +3139,9 @@ mod tests {
             digest: None,
         })
         .expect("fixture sorla loads");
-        let outcome = inference::update_answers(
-            &chat,
-            &existing,
-            &sorla,
-            "raise the amount tolerance to 5",
-        )
-        .expect("update succeeds");
+        let outcome =
+            inference::update_answers(&chat, &existing, &sorla, "raise the amount tolerance to 5")
+                .expect("update succeeds");
 
         let updated_reconciliation = outcome
             .answers
