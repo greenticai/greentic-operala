@@ -43,3 +43,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "greentic-operala"
 path = "src/main.rs"
+
+[workspace]
+members = ["crates/greentic-operala-designer-extension"]

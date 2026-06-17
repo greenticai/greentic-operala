@@ -1,0 +1,39 @@
+[package]
+name = "greentic-operala-designer-extension"
+version = "0.1.0-research"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/greenticai/greentic-operala"
+description = "Designer extension adapter for Greentic OperaLa."
+publish = false
+
+[lib]
+name = "greentic_operala_designer_extension"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+greentic-operala = { path = "../..", default-features = false }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wit-bindgen = "0.44"
+wit-bindgen-rt = "0.44"
+
+[dev-dependencies]
+# greentic-extension-sdk-contract = "=1.2.7-research"
+# CONCERN(T8/T9): latest published version on crates.io is 1.2.3-research;
+# 1.2.7-research is not yet available. Commented out to unblock native build.
+# Restore and bump version when the crate is published.
+
+[package.metadata.component]
+package = "greentic:operala-designer-extension"
+
+[package.metadata.component.target]
+path = "wit"
+world = "design-extension"
+
+[package.metadata.component.target.dependencies]
+"greentic:extension-base"   = { path = "wit-deps/extension-base.wit" }
+"greentic:extension-host"   = { path = "wit-deps/extension-host.wit" }
+"greentic:extension-design" = { path = "wit-deps/extension-design.wit" }
