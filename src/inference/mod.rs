@@ -7,9 +7,18 @@ pub mod diff;
 pub mod session;
 pub mod validate;
 
-use crate::{OperalaResult, PromptArgs, SorlaContract, follow_up_required};
-use greentic_llm::{CredentialSource, EnvCredentialSource, LlmProvider, ProviderKind, RigBackend};
+use crate::{OperalaResult, SorlaContract, follow_up_required};
 use serde_json::Value;
+
+// ProviderKind is only used in native-only code (LLM resolution tests + resolve_llm_request)
+#[cfg(not(target_arch = "wasm32"))]
+use greentic_llm::ProviderKind;
+
+// Native-only imports: credential resolution and rig backend
+#[cfg(not(target_arch = "wasm32"))]
+use crate::PromptArgs;
+#[cfg(not(target_arch = "wasm32"))]
+use greentic_llm::{CredentialSource, EnvCredentialSource, LlmProvider, RigBackend};
 
 use session::{InferenceOutcome, build_request, inference_messages, parse_outcome};
 use validate::validate_capability_answers;
@@ -115,16 +124,11 @@ pub struct UpdateOutcome {
 pub fn update_answers(
     chat: &dyn ChatFn,
     existing: &crate::OperalaAnswers,
-    sorla_path: &str,
+    sorla: &crate::SorlaContract,
     instruction: &str,
 ) -> OperalaResult<UpdateOutcome> {
     use crate::OperaLaExtension;
 
-    let sorla = crate::load_sorla_contract(&crate::SourceRef {
-        kind: crate::SourceKind::File,
-        uri: sorla_path.to_string(),
-        digest: None,
-    })?;
     let (extension_id, schema, existing_value) = match (
         &existing.capability_answers.reconciliation,
         &existing.capability_answers.bulk_ingest,
@@ -148,7 +152,7 @@ pub fn update_answers(
         chat,
         extension_id,
         &schema,
-        &sorla,
+        sorla,
         instruction,
         Some(&existing_value),
     )?;
@@ -180,6 +184,8 @@ pub fn update_answers(
     })
 }
 
+/// Native-only: LLM resolution, rig runtime, credential source.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedLlm {
     pub provider: ProviderKind,
@@ -189,6 +195,7 @@ pub struct ResolvedLlm {
 /// Resolve whether this invocation uses an LLM. Precedence: `--no-llm` >
 /// flags > `GREENTIC_LLM_PROVIDER`/`GREENTIC_LLM_MODEL` env > unset (None →
 /// deterministic keyword path). Env access is injected for testability.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_llm_request(
     args: &PromptArgs,
     env: &dyn Fn(&str) -> Option<String>,
@@ -223,6 +230,7 @@ pub fn resolve_llm_request(
 }
 
 /// Production wrapper over [`resolve_llm_request`] reading real process env.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_llm_request_from_process_env(
     args: &PromptArgs,
 ) -> OperalaResult<Option<ResolvedLlm>> {
@@ -231,11 +239,13 @@ pub fn resolve_llm_request_from_process_env(
 
 /// Owns the tokio runtime + provider backend for one CLI invocation.
 /// Operala is a sync binary; all async crate calls are `block_on`'d here.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct LlmRuntime {
     runtime: tokio::runtime::Runtime,
     backend: RigBackend,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl LlmRuntime {
     pub fn build(resolved: &ResolvedLlm) -> OperalaResult<Self> {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -278,6 +288,7 @@ pub trait ChatFn {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ChatFn for LlmRuntime {
     fn chat(
         &self,
@@ -291,7 +302,7 @@ impl ChatFn for LlmRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod tests_support {
     use super::ChatFn;
     use greentic_llm::mock::{TestLlmProvider, TestLlmProviderBuilder};
@@ -349,7 +360,7 @@ pub(crate) mod tests_support {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod driver_tests {
     use super::*;
     use crate::OperaLaExtension;
@@ -441,7 +452,7 @@ mod driver_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

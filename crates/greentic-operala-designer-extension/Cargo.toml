@@ -1,0 +1,37 @@
+[package]
+name = "greentic-operala-designer-extension"
+version = "0.1.0-research"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/greenticai/greentic-operala"
+description = "Designer extension adapter for Greentic OperaLa."
+publish = false
+
+[lib]
+name = "greentic_operala_designer_extension"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+greentic-operala = { path = "../..", default-features = false }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+wit-bindgen = "0.41"
+wit-bindgen-rt = "0.41"
+
+[dev-dependencies]
+# re-add a version with llmRoles support (>=1.2.7) when published, for full contract validation
+
+[package.metadata.component]
+package = "greentic:operala-designer-extension"
+
+[package.metadata.component.target]
+path = "wit"
+world = "design-extension"
+
+[package.metadata.component.target.dependencies]
+"greentic:extension-base"   = { path = "wit-deps/extension-base.wit" }
+"greentic:extension-host"   = { path = "wit-deps/extension-host.wit" }
+"greentic:extension-design" = { path = "wit-deps/extension-design.wit" }

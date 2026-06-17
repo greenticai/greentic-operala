@@ -1,16 +1,29 @@
-use clap::{Args, Parser, Subcommand};
-use greentic_pack::builder::{
-    FlowBundle, PACK_VERSION, PackBuilder, PackMeta, Provenance, Signing,
-};
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+// CLI-only: clap argument parsing
+#[cfg(feature = "cli")]
+use clap::{Args, Parser, Subcommand};
+
+// Pack builder types: available on all targets (wasm-compat shims in greentic-pack).
+use greentic_pack::builder::{
+    FlowBundle, PACK_VERSION, PackBuilder, PackMeta, Provenance, Signing,
+};
+use semver::Version;
+
+// Native-only: filesystem, environment, OsString
+#[cfg(not(target_arch = "wasm32"))]
 use std::env;
+// OsString is only used by CLI-entry-point helpers (cli feature).
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 use std::ffi::OsString;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 
 #[path = "../extensions/bulk-ingest/mod.rs"]
 mod bulk_ingest;
@@ -20,6 +33,11 @@ mod embedded_i18n {
 }
 
 pub mod inference;
+
+/// Re-export the core LLM message types used by `inference::ChatFn`.
+/// Extension crates should import these via `greentic_operala::` rather than
+/// depending on `greentic-llm` directly.
+pub use greentic_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, MessageRole};
 
 pub type OperalaResult<T> = Result<T, String>;
 
@@ -64,6 +82,7 @@ pub struct LocalCacheArtifactResolver {
 }
 
 impl LocalCacheArtifactResolver {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_env() -> Self {
         Self {
             root: env::var_os("OPERALA_DISTRIBUTOR_ROOT")
@@ -76,6 +95,7 @@ impl LocalCacheArtifactResolver {
         Self { root }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn resolve_sync(
         &self,
         reference: &str,
@@ -102,6 +122,7 @@ impl LocalCacheArtifactResolver {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ArtifactResolver for LocalCacheArtifactResolver {
     async fn resolve(
         &self,
@@ -113,6 +134,8 @@ impl ArtifactResolver for LocalCacheArtifactResolver {
     }
 }
 
+/// CLI entry-point parser — only available on native (cli feature).
+#[cfg(feature = "cli")]
 #[derive(Debug, Parser)]
 #[command(name = "greentic-operala")]
 #[command(about = "Author OperaLa operational handoff artifacts")]
@@ -121,49 +144,57 @@ pub struct OperalaCli {
     pub command: OperalaCommand,
 }
 
+/// CLI subcommands — only available on native (cli feature).
+#[cfg(feature = "cli")]
 #[derive(Debug, Subcommand)]
 pub enum OperalaCommand {
     Prompt(PromptArgs),
     Wizard(WizardArgs),
 }
 
-#[derive(Debug, Args)]
+/// Prompt command arguments — native-only (LLM resolution + file I/O).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+#[cfg_attr(feature = "cli", derive(Args))]
 pub struct PromptArgs {
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub sorla: String,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub locale: Option<String>,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub output: Option<PathBuf>,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub tenant: Option<String>,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub team: Option<String>,
     /// LLM provider for inference (overrides GREENTIC_LLM_PROVIDER).
-    #[arg(long, value_enum)]
+    #[cfg_attr(feature = "cli", arg(long, value_enum))]
     pub llm_provider: Option<greentic_llm::ProviderKind>,
     /// LLM model id (overrides GREENTIC_LLM_MODEL).
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub llm_model: Option<String>,
     /// Force the deterministic keyword path even when an LLM is configured.
-    #[arg(long, default_value_t = false)]
+    #[cfg_attr(feature = "cli", arg(long, default_value_t = false))]
     pub no_llm: bool,
     /// Existing answers.json to update (update mode; requires an LLM).
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub existing: Option<PathBuf>,
     /// Overwrite --existing in place instead of writing answers.updated.json.
-    #[arg(long, default_value_t = false)]
+    #[cfg_attr(feature = "cli", arg(long, default_value_t = false))]
     pub in_place: bool,
     pub prompt: String,
 }
 
-#[derive(Debug, Args)]
+/// Wizard command arguments — native-only (file I/O).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+#[cfg_attr(feature = "cli", derive(Args))]
 pub struct WizardArgs {
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub schema: bool,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub answers: Option<String>,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub locale: Option<String>,
 }
 
@@ -754,6 +785,7 @@ fn check_named_or_candidates(
     }
 }
 
+#[cfg(feature = "cli")]
 pub fn run_operala_cli() -> std::process::ExitCode {
     let args = env::args_os().collect::<Vec<_>>();
     if let Some(help) = localized_operala_help_for_args(&args) {
@@ -769,6 +801,7 @@ pub fn run_operala_cli() -> std::process::ExitCode {
     }
 }
 
+#[cfg(feature = "cli")]
 pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
     match cli.command {
         OperalaCommand::Prompt(args) => {
@@ -797,8 +830,12 @@ pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
                 let raw = fs::read_to_string(existing_path)
                     .map_err(|err| format!("failed to read {}: {err}", existing_path.display()))?;
                 let existing: OperalaAnswers = serde_json::from_str(&raw).map_err(to_string)?;
-                let outcome =
-                    inference::update_answers(chat, &existing, &args.sorla, &args.prompt)?;
+                let sorla = load_sorla_contract(&SourceRef {
+                    kind: SourceKind::File,
+                    uri: args.sorla.clone(),
+                    digest: None,
+                })?;
+                let outcome = inference::update_answers(chat, &existing, &sorla, &args.prompt)?;
                 let output = match (&args.output, args.in_place) {
                     (Some(output), _) => output.clone(),
                     (None, true) => existing_path.clone(),
@@ -849,10 +886,12 @@ pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn prompt_answers(args: &PromptArgs) -> OperalaResult<OperalaAnswers> {
     prompt_answers_with_llm(args, None)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn prompt_answers_with_llm(
     args: &PromptArgs,
     llm: Option<&dyn inference::ChatFn>,
@@ -960,6 +999,7 @@ pub fn prompt_answers_with_llm(
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn detect_capability(
     prompt: &str,
     llm: Option<&dyn inference::ChatFn>,
@@ -997,6 +1037,7 @@ fn detect_capability(
     ))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn wizard_schema(locale: Option<&str>) -> Value {
     let locale = normalized_locale(locale);
     let registry = ExtensionRegistry::built_in();
@@ -1027,6 +1068,7 @@ pub fn wizard_schema(locale: Option<&str>) -> Value {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_answers(reference: &str) -> OperalaResult<OperalaAnswers> {
     let path = resolve_local_path(reference, None, None)?;
     let bytes = fs::read(&path)
@@ -1035,6 +1077,7 @@ pub fn load_answers(reference: &str) -> OperalaResult<OperalaAnswers> {
         .map_err(|err| format!("failed to parse answers {}: {err}", path.display()))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
     let state_path = answers.outputs.work_dir.join("operala.state.json");
     let resumed = state_path.exists();
@@ -1355,37 +1398,53 @@ fn require_map_keys(
     Ok(())
 }
 
+/// Parse a SoRLa contract from a raw YAML string — no filesystem access.
+/// Available on both native and wasm32 targets.
+pub fn parse_sorla_contract_from_yaml(raw_yaml: &str) -> OperalaResult<SorlaContract> {
+    let actual_digest = format!("sha256:{}", sha256_hex(raw_yaml.as_bytes()));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(raw_yaml)
+        .map_err(|err| format!("failed to parse SoRLa YAML: {err}"))?;
+    let package = yaml
+        .get("package")
+        .and_then(serde_yaml::Value::as_mapping)
+        .ok_or_else(|| "SoRLa source must contain package".to_string())?;
+    Ok(SorlaContract {
+        source: SourceRef {
+            kind: SourceKind::File,
+            // The in-memory parse path has no URI; `load_sorla_contract`
+            // re-applies the real file URI after delegating here.
+            uri: String::new(),
+            digest: Some(actual_digest.clone()),
+        },
+        source_digest: actual_digest,
+        package_name: yaml_string(package, "name").unwrap_or_else(|| "unknown".to_string()),
+        package_version: yaml_string(package, "version").unwrap_or_else(|| "0.1.0".to_string()),
+        records: yaml_named_list(&yaml, "records"),
+        events: yaml_named_list(&yaml, "events"),
+        actions: yaml_named_list(&yaml, "actions"),
+        agent_endpoints: yaml_id_list(&yaml, "agent_endpoints"),
+        raw_yaml: raw_yaml.to_string(),
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_sorla_contract(source: &SourceRef) -> OperalaResult<SorlaContract> {
     let path = resolve_local_path(&source.uri, None, None)?;
     let raw_yaml = fs::read_to_string(&path)
         .map_err(|err| format!("failed to read SoRLa source {}: {err}", path.display()))?;
     let actual_digest = format!("sha256:{}", sha256_hex(raw_yaml.as_bytes()));
     verify_reference_digest(&source.uri, source.digest.as_deref(), &actual_digest)?;
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&raw_yaml)
-        .map_err(|err| format!("failed to parse SoRLa YAML {}: {err}", path.display()))?;
-    let package = yaml
-        .get("package")
-        .and_then(serde_yaml::Value::as_mapping)
-        .ok_or_else(|| "SoRLa source must contain package".to_string())?;
-    let package_name = yaml_string(package, "name").unwrap_or_else(|| "unknown".to_string());
-    let package_version = yaml_string(package, "version").unwrap_or_else(|| "0.1.0".to_string());
-    Ok(SorlaContract {
-        source: SourceRef {
-            kind: source.kind.clone(),
-            uri: source.uri.clone(),
-            digest: Some(actual_digest.clone()),
-        },
-        source_digest: actual_digest,
-        package_name,
-        package_version,
-        records: yaml_named_list(&yaml, "records"),
-        events: yaml_named_list(&yaml, "events"),
-        actions: yaml_named_list(&yaml, "actions"),
-        agent_endpoints: yaml_id_list(&yaml, "agent_endpoints"),
-        raw_yaml,
-    })
+    let mut contract = parse_sorla_contract_from_yaml(&raw_yaml)?;
+    // Re-apply the full source reference (uri + kind) from the caller.
+    contract.source = SourceRef {
+        kind: source.kind.clone(),
+        uri: source.uri.clone(),
+        digest: Some(actual_digest),
+    };
+    Ok(contract)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn infer_reconciliation_answers(sorla: &SorlaContract) -> OperalaResult<ReconciliationAnswers> {
     let source_event =
         pick(&sorla.events, &["BankTransaction", "PaymentWebhook"]).ok_or_else(|| {
@@ -1468,6 +1527,7 @@ fn follow_up_required(question: &str) -> String {
     format!("follow-up required: {question}")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn sorla_patch_proposal(
     readiness: &ReadinessReport,
     sorla: &SorlaContract,
@@ -1517,6 +1577,7 @@ fn sorla_patch_proposal(
     Ok(proposal)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn add_payment_record_operation(record_name: &str) -> Value {
     let patch_name = patch_record_name(record_name);
     json!({
@@ -1536,6 +1597,7 @@ fn add_payment_record_operation(record_name: &str) -> Value {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn add_reconciliation_case_record_operation(record_name: &str) -> Value {
     let patch_name = patch_record_name(record_name);
     json!({
@@ -1555,6 +1617,7 @@ fn add_reconciliation_case_record_operation(record_name: &str) -> Value {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn validate_sorla_patch_proposal(proposal: &Value) -> OperalaResult<()> {
     if proposal["schema"] != "greentic.sorla.patch.v1" {
         return Err("SoRLa patch proposal has unsupported schema".to_string());
@@ -1618,12 +1681,14 @@ fn validate_sorla_patch_proposal(proposal: &Value) -> OperalaResult<()> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn missing_concept_name(message: &str) -> Option<&str> {
     let (_, rest) = message.split_once('`')?;
     let (name, _) = rest.split_once('`')?;
     Some(name)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn patch_record_name(name: &str) -> String {
     let mut out = String::new();
     let mut previous_was_separator = true;
@@ -1651,6 +1716,7 @@ fn patch_record_name(name: &str) -> String {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_sorla_patch_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -1660,6 +1726,7 @@ fn is_sorla_patch_identifier(value: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_lock(
     answers: &OperalaAnswers,
     sorla: &SorlaContract,
@@ -1678,6 +1745,7 @@ fn build_lock(
     }))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_summary(readiness: &ReadinessReport, handoff: &OperaLaHandoff) -> String {
     let locale = None;
     let unresolved = if readiness.missing.is_empty() {
@@ -1710,6 +1778,7 @@ fn build_summary(readiness: &ReadinessReport, handoff: &OperaLaHandoff) -> Strin
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn capability_output_name(answers: &OperalaAnswers, handoff: &OperaLaHandoff) -> String {
     answers
         .capability_answers
@@ -1726,6 +1795,7 @@ fn capability_output_name(answers: &OperalaAnswers, handoff: &OperaLaHandoff) ->
         .unwrap_or_else(|| handoff.capability.clone())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_wizard_state(
     path: &Path,
     status: &str,
@@ -1756,6 +1826,7 @@ fn write_wizard_state(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_handoff_assets(work_dir: &Path, handoff: &OperaLaHandoff) -> OperalaResult<()> {
     write_yaml_file(work_dir.join("operala.yaml"), handoff)?;
     write_json_file(
@@ -1819,23 +1890,9 @@ fn write_handoff_assets(work_dir: &Path, handoff: &OperaLaHandoff) -> OperalaRes
     Ok(())
 }
 
-fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<()> {
-    if path.is_file() {
-        fs::remove_file(path)
-            .map_err(|err| format!("failed to replace pack file {}: {err}", path.display()))?;
-    } else if path.is_dir() {
-        fs::remove_dir_all(path).map_err(|err| {
-            format!(
-                "failed to replace pack directory {} with archive: {err}",
-                path.display()
-            )
-        })?;
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
-    }
-
+/// Assemble a [`PackBuilder`] from the given handoff — no filesystem I/O.
+/// Available on all targets (native and wasm32).
+fn build_operala_pack_builder(handoff: &OperaLaHandoff) -> OperalaResult<PackBuilder> {
     let pack_name = format!(
         "{}-{}",
         handoff.sorla.package_name,
@@ -1948,6 +2005,38 @@ fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<
             serde_json::to_vec_pretty(schema).map_err(to_string)?,
         );
     }
+    Ok(builder)
+}
+
+/// Returns the in-memory file set (archive path → bytes) that would be written into a `.gtpack`.
+/// Includes `manifest.cbor`, `manifest.json`, `provenance.json`, `sbom.json`, and all assets.
+/// No filesystem I/O — available on all targets (native and wasm32).
+pub fn build_operala_pack_entries(
+    handoff: &OperaLaHandoff,
+) -> OperalaResult<Vec<(String, Vec<u8>)>> {
+    let builder = build_operala_pack_builder(handoff)?;
+    let map = builder.entries().map_err(to_string)?;
+    Ok(map.into_iter().collect())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<()> {
+    if path.is_file() {
+        fs::remove_file(path)
+            .map_err(|err| format!("failed to replace pack file {}: {err}", path.display()))?;
+    } else if path.is_dir() {
+        fs::remove_dir_all(path).map_err(|err| {
+            format!(
+                "failed to replace pack directory {} with archive: {err}",
+                path.display()
+            )
+        })?;
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    let builder = build_operala_pack_builder(handoff)?;
     builder.build(path).map_err(to_string)?;
     Ok(())
 }
@@ -2033,6 +2122,7 @@ fn yaml_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn pick(candidates: &[String], preferred: &[&str]) -> Option<String> {
     preferred
         .iter()
@@ -2073,6 +2163,7 @@ fn default_true() -> bool {
     true
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_local_path(
     reference: &str,
     tenant: Option<&str>,
@@ -2087,6 +2178,7 @@ fn resolve_local_path(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_json_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaResult<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -2097,6 +2189,7 @@ fn write_json_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaR
     fs::write(path, bytes).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_yaml_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaResult<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -2118,6 +2211,7 @@ fn to_string<E: std::fmt::Display>(err: E) -> String {
     err.to_string()
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn has_help(args: &[OsString]) -> bool {
     args.iter().skip(1).any(|arg| {
         let arg = arg.to_string_lossy();
@@ -2125,6 +2219,7 @@ fn has_help(args: &[OsString]) -> bool {
     })
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn explicit_locale_arg(args: &[OsString]) -> Option<String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -2139,6 +2234,7 @@ fn explicit_locale_arg(args: &[OsString]) -> Option<String> {
     None
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn locale_from_args(args: &[OsString]) -> Option<String> {
     explicit_locale_arg(args)
         .or_else(|| env::var("OPERALA_LOCALE").ok())
@@ -2200,6 +2296,7 @@ fn text_direction(locale: &str) -> &'static str {
     }
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperalaHelpCommand {
     Root,
@@ -2207,6 +2304,7 @@ enum OperalaHelpCommand {
     Wizard,
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_help_for_args(args: &[OsString]) -> Option<String> {
     if !has_help(args) {
         return None;
@@ -2219,6 +2317,7 @@ fn localized_operala_help_for_args(args: &[OsString]) -> Option<String> {
     })
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn operala_help_command(args: &[OsString]) -> OperalaHelpCommand {
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -2238,6 +2337,7 @@ fn operala_help_command(args: &[OsString]) -> OperalaHelpCommand {
     OperalaHelpCommand::Root
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala <COMMAND>\n\n{commands}:\n  prompt    {prompt}\n  wizard    {wizard}\n\n{options}:\n      --locale <LOCALE>  {locale_option}\n  -h, --help             {help_option}\n",
@@ -2252,6 +2352,7 @@ fn localized_operala_help(locale: Option<&str>) -> String {
     )
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_prompt_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala prompt --sorla <FILE> [OPTIONS] <PROMPT>\n\n{options}:\n      --sorla <FILE>     {sorla_option}\n      --locale <LOCALE>  {locale_option}\n      --output <FILE>    {output_option}\n      --tenant <TENANT>  {tenant_option}\n      --team <TEAM>      {team_option}\n  -h, --help             {help_option}\n",
@@ -2267,6 +2368,7 @@ fn localized_operala_prompt_help(locale: Option<&str>) -> String {
     )
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_wizard_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala wizard [OPTIONS]\n\n{options}:\n      --schema           {schema_option}\n      --answers <REF>    {answers_option}\n      --locale <LOCALE>  {locale_option}\n  -h, --help             {help_option}\n",
@@ -2280,6 +2382,7 @@ fn localized_operala_wizard_help(locale: Option<&str>) -> String {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn distributed_cache_file_name(reference: &str) -> String {
     let escaped = reference
         .chars()
@@ -2294,17 +2397,38 @@ fn distributed_cache_file_name(reference: &str) -> String {
     format!("{escaped}.json")
 }
 
+// Native + cli feature: validates the greentic_qa_lib linkage and returns its name.
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn greentic_qa_engine() -> &'static str {
     let _ = std::any::type_name::<greentic_qa_lib::WizardRunConfig>();
     "greentic-qa-lib"
 }
 
+// Native without cli feature (e.g. when consumed as a library dependency):
+// greentic_qa_lib is not linked; return the static label directly.
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "cli")))]
+fn greentic_qa_engine() -> &'static str {
+    "greentic-qa-lib"
+}
+
+// Wasm: greentic-qa-lib is CLI-only and not available on wasm32; return a
+// static label so wasm-safe callers can still use this as a const string.
+// (wizard_schema itself is also gated native-only for T5; this stub is kept
+// for future wasm-safe schema serialisation if needed.)
+#[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
+fn greentic_qa_engine() -> &'static str {
+    "greentic-qa-lib"
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn is_distributed_reference(reference: &str) -> bool {
     ["oci://", "store://", "repo://"]
         .iter()
         .any(|scheme| reference.starts_with(scheme))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn verify_reference_digest(
     reference: &str,
     declared_digest: Option<&str>,
@@ -2326,6 +2450,16 @@ fn verify_reference_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_sorla_from_yaml_matches_file_load() {
+        let yaml = std::fs::read_to_string("extensions/reconciliation/examples/tenancy/sorla.yaml")
+            .unwrap();
+        let parsed = parse_sorla_contract_from_yaml(&yaml).expect("parse");
+        assert_eq!(parsed.raw_yaml, yaml);
+        assert!(!parsed.records.is_empty());
+        assert_eq!(parsed.source.kind, SourceKind::File);
+    }
 
     #[test]
     fn validates_fixture_answers() {
@@ -3028,13 +3162,15 @@ mod tests {
             updated_value,
         )]);
 
-        let outcome = inference::update_answers(
-            &chat,
-            &existing,
-            "extensions/reconciliation/examples/tenancy/sorla.yaml",
-            "raise the amount tolerance to 5",
-        )
-        .expect("update succeeds");
+        let sorla = load_sorla_contract(&SourceRef {
+            kind: SourceKind::File,
+            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
+            digest: None,
+        })
+        .expect("fixture sorla loads");
+        let outcome =
+            inference::update_answers(&chat, &existing, &sorla, "raise the amount tolerance to 5")
+                .expect("update succeeds");
 
         let updated_reconciliation = outcome
             .answers
@@ -3141,5 +3277,43 @@ mod tests {
             .expect("nested bulk");
         assert!(!bulk.record_collections.is_empty());
         validate_answers(&answers).expect("validates");
+    }
+
+    #[test]
+    fn pack_entries_include_manifest_and_handoff() {
+        let handoff = sample_handoff();
+        let entries = build_operala_pack_entries(&handoff).expect("entries");
+        let paths: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            paths.contains(&"manifest.cbor"),
+            "missing manifest.cbor; got: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"assets/operala/operala-handoff.json"),
+            "missing assets/operala/operala-handoff.json; got: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"assets/operala/operala.yaml"),
+            "missing assets/operala/operala.yaml; got: {paths:?}"
+        );
+    }
+
+    fn sample_handoff() -> OperaLaHandoff {
+        let sorla = load_sorla_contract(&SourceRef {
+            kind: SourceKind::File,
+            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
+            digest: None,
+        })
+        .expect("fixture sorla loads");
+        let answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
+        let readiness = RECONCILIATION_EXTENSION
+            .analyse_sorla(&sorla, &answers)
+            .expect("readiness succeeds");
+        RECONCILIATION_EXTENSION
+            .build_handoff(&sorla, &answers, &readiness)
+            .expect("handoff builds")
     }
 }
