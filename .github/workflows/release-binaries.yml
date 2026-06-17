@@ -15,10 +15,11 @@ jobs:
       - name: Publish to Greentic Store
         uses: greenticai/greentic-designer-extension-action@v2
         with:
-          # Pre-release pin for the contract 1.2.x line — exact version required
+          # Pre-release pin for the gtdx CLI used to publish — exact version required
           # because cargo `^1.2.0-research` would resolve forward to any future
-          # stable 1.2.0. Mirror this with the dev-dependency pin in
-          # crates/greentic-operala-designer-extension/Cargo.toml.
+          # stable 1.2.0. This pins the gtdx CLI version, not a Cargo dev-dep.
+          # Contract validation via greentic-extension-sdk-contract is deferred
+          # until a version with llmRoles support (>=1.2.7) is published.
           gtdx-version: "=1.2.7-research"
           manifest: crates/greentic-operala-designer-extension/Cargo.toml
           store-url: https://store.greentic.cloud

@@ -386,10 +386,11 @@ mod tests {
             "capability": "reconciliation"
         });
         let result = generate_answers_with_chat(&input, &chat).unwrap();
-        // Either "answers" (success) or "follow_up" (scripted chat exhausted retries) is acceptable.
+        // The fixture answers pass validation (catalog bindings are valid), so the
+        // inference session must return {answers} on the first try.
         assert!(
-            result.get("answers").is_some() || result.get("follow_up").is_some(),
-            "expected answers or follow_up, got: {result}"
+            result.get("answers").is_some(),
+            "expected answers on first try with valid fixture payload, got: {result}"
         );
     }
 

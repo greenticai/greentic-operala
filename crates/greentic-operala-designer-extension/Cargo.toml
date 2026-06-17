@@ -18,8 +18,8 @@ base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-wit-bindgen = "0.44"
-wit-bindgen-rt = "0.44"
+wit-bindgen = "0.41"
+wit-bindgen-rt = "0.41"
 
 [dev-dependencies]
 # re-add a version with llmRoles support (>=1.2.7) when published, for full contract validation
