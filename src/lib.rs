@@ -17,7 +17,8 @@ use semver::Version;
 // Native-only: filesystem, environment, OsString
 #[cfg(not(target_arch = "wasm32"))]
 use std::env;
-#[cfg(not(target_arch = "wasm32"))]
+// OsString is only used by CLI-entry-point helpers (cli feature).
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 use std::ffi::OsString;
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
@@ -2205,7 +2206,7 @@ fn to_string<E: std::fmt::Display>(err: E) -> String {
     err.to_string()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn has_help(args: &[OsString]) -> bool {
     args.iter().skip(1).any(|arg| {
         let arg = arg.to_string_lossy();
@@ -2213,7 +2214,7 @@ fn has_help(args: &[OsString]) -> bool {
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn explicit_locale_arg(args: &[OsString]) -> Option<String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -2228,7 +2229,7 @@ fn explicit_locale_arg(args: &[OsString]) -> Option<String> {
     None
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn locale_from_args(args: &[OsString]) -> Option<String> {
     explicit_locale_arg(args)
         .or_else(|| env::var("OPERALA_LOCALE").ok())
@@ -2290,7 +2291,7 @@ fn text_direction(locale: &str) -> &'static str {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperalaHelpCommand {
     Root,
@@ -2298,7 +2299,7 @@ enum OperalaHelpCommand {
     Wizard,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_help_for_args(args: &[OsString]) -> Option<String> {
     if !has_help(args) {
         return None;
@@ -2311,7 +2312,7 @@ fn localized_operala_help_for_args(args: &[OsString]) -> Option<String> {
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn operala_help_command(args: &[OsString]) -> OperalaHelpCommand {
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -2331,7 +2332,7 @@ fn operala_help_command(args: &[OsString]) -> OperalaHelpCommand {
     OperalaHelpCommand::Root
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala <COMMAND>\n\n{commands}:\n  prompt    {prompt}\n  wizard    {wizard}\n\n{options}:\n      --locale <LOCALE>  {locale_option}\n  -h, --help             {help_option}\n",
@@ -2346,7 +2347,7 @@ fn localized_operala_help(locale: Option<&str>) -> String {
     )
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_prompt_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala prompt --sorla <FILE> [OPTIONS] <PROMPT>\n\n{options}:\n      --sorla <FILE>     {sorla_option}\n      --locale <LOCALE>  {locale_option}\n      --output <FILE>    {output_option}\n      --tenant <TENANT>  {tenant_option}\n      --team <TEAM>      {team_option}\n  -h, --help             {help_option}\n",
@@ -2362,7 +2363,7 @@ fn localized_operala_prompt_help(locale: Option<&str>) -> String {
     )
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_wizard_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala wizard [OPTIONS]\n\n{options}:\n      --schema           {schema_option}\n      --answers <REF>    {answers_option}\n      --locale <LOCALE>  {locale_option}\n  -h, --help             {help_option}\n",
@@ -2391,10 +2392,17 @@ fn distributed_cache_file_name(reference: &str) -> String {
     format!("{escaped}.json")
 }
 
-// Native: validates the greentic_qa_lib linkage and returns its name.
-#[cfg(not(target_arch = "wasm32"))]
+// Native + cli feature: validates the greentic_qa_lib linkage and returns its name.
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn greentic_qa_engine() -> &'static str {
     let _ = std::any::type_name::<greentic_qa_lib::WizardRunConfig>();
+    "greentic-qa-lib"
+}
+
+// Native without cli feature (e.g. when consumed as a library dependency):
+// greentic_qa_lib is not linked; return the static label directly.
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "cli")))]
+fn greentic_qa_engine() -> &'static str {
     "greentic-qa-lib"
 }
 
