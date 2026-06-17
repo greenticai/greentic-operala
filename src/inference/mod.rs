@@ -121,21 +121,14 @@ pub struct UpdateOutcome {
 /// Update mode: regenerate the capability answers via LLM from the existing
 /// document + change instruction; preserve the outer envelope; return the
 /// validated document plus a structural diff for human review.
-/// Native-only: requires file I/O via `load_sorla_contract`.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn update_answers(
     chat: &dyn ChatFn,
     existing: &crate::OperalaAnswers,
-    sorla_path: &str,
+    sorla: &crate::SorlaContract,
     instruction: &str,
 ) -> OperalaResult<UpdateOutcome> {
     use crate::OperaLaExtension;
 
-    let sorla = crate::load_sorla_contract(&crate::SourceRef {
-        kind: crate::SourceKind::File,
-        uri: sorla_path.to_string(),
-        digest: None,
-    })?;
     let (extension_id, schema, existing_value) = match (
         &existing.capability_answers.reconciliation,
         &existing.capability_answers.bulk_ingest,
@@ -159,7 +152,7 @@ pub fn update_answers(
         chat,
         extension_id,
         &schema,
-        &sorla,
+        sorla,
         instruction,
         Some(&existing_value),
     )?;

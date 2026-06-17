@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[cfg(not(target_arch = "wasm32"))]
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -825,8 +824,13 @@ pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
                 let raw = fs::read_to_string(existing_path)
                     .map_err(|err| format!("failed to read {}: {err}", existing_path.display()))?;
                 let existing: OperalaAnswers = serde_json::from_str(&raw).map_err(to_string)?;
+                let sorla = load_sorla_contract(&SourceRef {
+                    kind: SourceKind::File,
+                    uri: args.sorla.clone(),
+                    digest: None,
+                })?;
                 let outcome =
-                    inference::update_answers(chat, &existing, &args.sorla, &args.prompt)?;
+                    inference::update_answers(chat, &existing, &sorla, &args.prompt)?;
                 let output = match (&args.output, args.in_place) {
                     (Some(output), _) => output.clone(),
                     (None, true) => existing_path.clone(),
@@ -1389,6 +1393,34 @@ fn require_map_keys(
     Ok(())
 }
 
+/// Parse a SoRLa contract from a raw YAML string — no filesystem access.
+/// Available on both native and wasm32 targets.
+pub fn parse_sorla_contract_from_yaml(raw_yaml: &str) -> OperalaResult<SorlaContract> {
+    let actual_digest = format!("sha256:{}", sha256_hex(raw_yaml.as_bytes()));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(raw_yaml)
+        .map_err(|err| format!("failed to parse SoRLa YAML: {err}"))?;
+    let package = yaml
+        .get("package")
+        .and_then(serde_yaml::Value::as_mapping)
+        .ok_or_else(|| "SoRLa source must contain package".to_string())?;
+    Ok(SorlaContract {
+        source: SourceRef {
+            kind: SourceKind::File,
+            uri: String::new(),
+            digest: Some(actual_digest.clone()),
+        },
+        source_digest: actual_digest,
+        package_name: yaml_string(package, "name").unwrap_or_else(|| "unknown".to_string()),
+        package_version: yaml_string(package, "version")
+            .unwrap_or_else(|| "0.1.0".to_string()),
+        records: yaml_named_list(&yaml, "records"),
+        events: yaml_named_list(&yaml, "events"),
+        actions: yaml_named_list(&yaml, "actions"),
+        agent_endpoints: yaml_id_list(&yaml, "agent_endpoints"),
+        raw_yaml: raw_yaml.to_string(),
+    })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_sorla_contract(source: &SourceRef) -> OperalaResult<SorlaContract> {
     let path = resolve_local_path(&source.uri, None, None)?;
@@ -1396,29 +1428,14 @@ pub fn load_sorla_contract(source: &SourceRef) -> OperalaResult<SorlaContract> {
         .map_err(|err| format!("failed to read SoRLa source {}: {err}", path.display()))?;
     let actual_digest = format!("sha256:{}", sha256_hex(raw_yaml.as_bytes()));
     verify_reference_digest(&source.uri, source.digest.as_deref(), &actual_digest)?;
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&raw_yaml)
-        .map_err(|err| format!("failed to parse SoRLa YAML {}: {err}", path.display()))?;
-    let package = yaml
-        .get("package")
-        .and_then(serde_yaml::Value::as_mapping)
-        .ok_or_else(|| "SoRLa source must contain package".to_string())?;
-    let package_name = yaml_string(package, "name").unwrap_or_else(|| "unknown".to_string());
-    let package_version = yaml_string(package, "version").unwrap_or_else(|| "0.1.0".to_string());
-    Ok(SorlaContract {
-        source: SourceRef {
-            kind: source.kind.clone(),
-            uri: source.uri.clone(),
-            digest: Some(actual_digest.clone()),
-        },
-        source_digest: actual_digest,
-        package_name,
-        package_version,
-        records: yaml_named_list(&yaml, "records"),
-        events: yaml_named_list(&yaml, "events"),
-        actions: yaml_named_list(&yaml, "actions"),
-        agent_endpoints: yaml_id_list(&yaml, "agent_endpoints"),
-        raw_yaml,
-    })
+    let mut contract = parse_sorla_contract_from_yaml(&raw_yaml)?;
+    // Re-apply the full source reference (uri + kind) from the caller.
+    contract.source = SourceRef {
+        kind: source.kind.clone(),
+        uri: source.uri.clone(),
+        digest: Some(actual_digest),
+    };
+    Ok(contract)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2051,7 +2068,6 @@ fn daily_bank_transactions_schema() -> Value {
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn yaml_named_list(yaml: &serde_yaml::Value, key: &str) -> Vec<String> {
     yaml.get(key)
         .and_then(serde_yaml::Value::as_sequence)
@@ -2065,7 +2081,6 @@ fn yaml_named_list(yaml: &serde_yaml::Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn yaml_id_list(yaml: &serde_yaml::Value, key: &str) -> Vec<String> {
     yaml.get(key)
         .and_then(serde_yaml::Value::as_sequence)
@@ -2079,7 +2094,6 @@ fn yaml_id_list(yaml: &serde_yaml::Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn yaml_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
     map.get(serde_yaml::Value::String(key.to_string()))
         .and_then(serde_yaml::Value::as_str)
@@ -2164,7 +2178,6 @@ fn write_yaml_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaR
     fs::write(path, text).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -2408,6 +2421,18 @@ fn verify_reference_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_sorla_from_yaml_matches_file_load() {
+        let yaml = std::fs::read_to_string(
+            "extensions/reconciliation/examples/tenancy/sorla.yaml",
+        )
+        .unwrap();
+        let parsed = parse_sorla_contract_from_yaml(&yaml).expect("parse");
+        assert_eq!(parsed.raw_yaml, yaml);
+        assert!(!parsed.records.is_empty());
+        assert_eq!(parsed.source.kind, SourceKind::File);
+    }
 
     #[test]
     fn validates_fixture_answers() {
@@ -3110,10 +3135,16 @@ mod tests {
             updated_value,
         )]);
 
+        let sorla = load_sorla_contract(&SourceRef {
+            kind: SourceKind::File,
+            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
+            digest: None,
+        })
+        .expect("fixture sorla loads");
         let outcome = inference::update_answers(
             &chat,
             &existing,
-            "extensions/reconciliation/examples/tenancy/sorla.yaml",
+            &sorla,
             "raise the amount tolerance to 5",
         )
         .expect("update succeeds");
