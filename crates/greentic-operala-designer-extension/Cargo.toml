@@ -22,7 +22,7 @@ wit-bindgen = "0.44"
 wit-bindgen-rt = "0.44"
 
 [dev-dependencies]
-greentic-extension-sdk-contract = "=1.2.3-research"
+# re-add a version with llmRoles support (>=1.2.7) when published, for full contract validation
 
 [package.metadata.component]
 package = "greentic:operala-designer-extension"

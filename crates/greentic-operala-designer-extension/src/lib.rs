@@ -437,4 +437,70 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unknown OperaLa tool"));
     }
+
+    // ── describe.json sanity ─────────────────────────────────────────────────
+    //
+    // Full sdk-contract validation is blocked until a version with `llmRoles`
+    // support (>=1.2.7) is published to crates.io. This hand-rolled test checks
+    // the fields the extension contract would validate, plus the exact tool set.
+
+    #[test]
+    fn describe_json_sanity() {
+        let raw = include_str!("../describe.json");
+        let v: Value = serde_json::from_str(raw).expect("describe.json must be valid JSON");
+
+        // Top-level envelope.
+        assert_eq!(v["apiVersion"], "greentic.ai/v2", "apiVersion mismatch");
+        assert_eq!(v["kind"], "DesignExtension", "kind mismatch");
+
+        // metadata.id.
+        assert_eq!(
+            v["metadata"]["id"],
+            "greentic.operala",
+            "metadata.id mismatch"
+        );
+
+        // runtime.permissions.llmRoles must contain exactly ["operala_composer"].
+        let llm_roles = v["runtime"]["permissions"]["llmRoles"]
+            .as_array()
+            .expect("runtime.permissions.llmRoles must be an array");
+        assert_eq!(
+            llm_roles.iter().map(|r| r.as_str().unwrap_or("")).collect::<Vec<_>>(),
+            vec!["operala_composer"],
+            "llmRoles must be exactly [\"operala_composer\"]"
+        );
+
+        // runtime.components.operala.world.
+        assert_eq!(
+            v["runtime"]["components"]["operala"]["world"],
+            "greentic:operala-designer-extension/design-extension",
+            "component world mismatch"
+        );
+
+        // contributions.tools must be exactly the 5 expected tool names, in order.
+        let expected_tools = [
+            "list_operala_capabilities",
+            "generate_operala_answers",
+            "update_operala_answers",
+            "validate_operala_answers",
+            "generate_handoff_pack",
+        ];
+        let described_tools: Vec<&str> = v["contributions"]["tools"]
+            .as_array()
+            .expect("contributions.tools must be an array")
+            .iter()
+            .map(|t| t["name"].as_str().expect("tool name must be a string"))
+            .collect();
+        assert_eq!(
+            described_tools, expected_tools,
+            "contributions.tools names/order mismatch"
+        );
+
+        // Cross-check: describe.json tool set must match list_tools().
+        let listed_tools: Vec<&str> = list_tools().iter().map(|t| t.name).collect();
+        assert_eq!(
+            described_tools, listed_tools,
+            "describe.json tools must match list_tools() exactly"
+        );
+    }
 }
