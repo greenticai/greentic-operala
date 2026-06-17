@@ -8,13 +8,13 @@ use std::path::PathBuf;
 #[cfg(feature = "cli")]
 use clap::{Args, Parser, Subcommand};
 
-// Native-only: pack builder, filesystem, environment
-#[cfg(not(target_arch = "wasm32"))]
+// Pack builder types: available on all targets (wasm-compat shims in greentic-pack).
 use greentic_pack::builder::{
     FlowBundle, PACK_VERSION, PackBuilder, PackMeta, Provenance, Signing,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use semver::Version;
+
+// Native-only: filesystem, environment, OsString
 #[cfg(not(target_arch = "wasm32"))]
 use std::env;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1884,24 +1884,9 @@ fn write_handoff_assets(work_dir: &Path, handoff: &OperaLaHandoff) -> OperalaRes
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<()> {
-    if path.is_file() {
-        fs::remove_file(path)
-            .map_err(|err| format!("failed to replace pack file {}: {err}", path.display()))?;
-    } else if path.is_dir() {
-        fs::remove_dir_all(path).map_err(|err| {
-            format!(
-                "failed to replace pack directory {} with archive: {err}",
-                path.display()
-            )
-        })?;
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
-    }
-
+/// Assemble a [`PackBuilder`] from the given handoff — no filesystem I/O.
+/// Available on all targets (native and wasm32).
+fn build_operala_pack_builder(handoff: &OperaLaHandoff) -> OperalaResult<PackBuilder> {
     let pack_name = format!(
         "{}-{}",
         handoff.sorla.package_name,
@@ -2014,11 +1999,42 @@ fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<
             serde_json::to_vec_pretty(schema).map_err(to_string)?,
         );
     }
+    Ok(builder)
+}
+
+/// Returns the in-memory file set (archive path → bytes) that would be written into a `.gtpack`.
+/// Includes `manifest.cbor`, `manifest.json`, `provenance.json`, `sbom.json`, and all assets.
+/// No filesystem I/O — available on all targets (native and wasm32).
+pub fn build_operala_pack_entries(
+    handoff: &OperaLaHandoff,
+) -> OperalaResult<Vec<(String, Vec<u8>)>> {
+    let builder = build_operala_pack_builder(handoff)?;
+    let map = builder.entries().map_err(to_string)?;
+    Ok(map.into_iter().collect())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<()> {
+    if path.is_file() {
+        fs::remove_file(path)
+            .map_err(|err| format!("failed to replace pack file {}: {err}", path.display()))?;
+    } else if path.is_dir() {
+        fs::remove_dir_all(path).map_err(|err| {
+            format!(
+                "failed to replace pack directory {} with archive: {err}",
+                path.display()
+            )
+        })?;
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    let builder = build_operala_pack_builder(handoff)?;
     builder.build(path).map_err(to_string)?;
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn sanitize_pack_segment(value: &str) -> String {
     let sanitized = value
         .chars()
@@ -3248,5 +3264,43 @@ mod tests {
             .expect("nested bulk");
         assert!(!bulk.record_collections.is_empty());
         validate_answers(&answers).expect("validates");
+    }
+
+    #[test]
+    fn pack_entries_include_manifest_and_handoff() {
+        let handoff = sample_handoff();
+        let entries = build_operala_pack_entries(&handoff).expect("entries");
+        let paths: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            paths.contains(&"manifest.cbor"),
+            "missing manifest.cbor; got: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"assets/operala/operala-handoff.json"),
+            "missing assets/operala/operala-handoff.json; got: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"assets/operala/operala.yaml"),
+            "missing assets/operala/operala.yaml; got: {paths:?}"
+        );
+    }
+
+    fn sample_handoff() -> OperaLaHandoff {
+        let sorla = load_sorla_contract(&SourceRef {
+            kind: SourceKind::File,
+            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
+            digest: None,
+        })
+        .expect("fixture sorla loads");
+        let answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
+        let readiness = RECONCILIATION_EXTENSION
+            .analyse_sorla(&sorla, &answers)
+            .expect("readiness succeeds");
+        RECONCILIATION_EXTENSION
+            .build_handoff(&sorla, &answers, &readiness)
+            .expect("handoff builds")
     }
 }
