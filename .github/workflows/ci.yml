@@ -43,7 +43,10 @@ jobs:
       - name: Install Greentic binary tools
         run: |
           cargo install cargo-binstall --locked
-          cargo binstall -y greentic-operax
+          # greentic-operax is not yet published to crates.io; don't fail the
+          # whole job at setup when binstall can't find it (local-check does
+          # not invoke the operax binary).
+          cargo binstall -y greentic-operax || echo "::warning::greentic-operax not yet published; skipping install"
       - name: Run local check
         working-directory: greentic-operala
         run: bash ci/local_check.sh
