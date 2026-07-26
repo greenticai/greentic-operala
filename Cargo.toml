@@ -39,6 +39,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.11"
+# chrono+cron: vendored trigger-schedule vocabulary (src/business_events/schedule.rs).
+# operala cannot depend on greentic-triggers directly (greentic-types release-train
+# conflict); these two crates do not pull greentic-types themselves.
+chrono = { version = "0.4", features = ["clock", "serde"] }
+cron = "0.16"
 
 # Native-only heavy dependencies: LLM rig backend, pack native machinery, async runtime.
 # Cargo unions these features with the base [dependencies] entries above.
