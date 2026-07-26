@@ -32,6 +32,7 @@ mod embedded_i18n {
     include!(concat!(env!("OUT_DIR"), "/embedded_i18n.rs"));
 }
 
+pub mod business_events;
 pub mod inference;
 
 /// Re-export the core LLM message types used by `inference::ChatFn`.
@@ -268,6 +269,35 @@ pub struct CapabilityAnswers {
     pub reconciliation: Option<ReconciliationAnswers>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bulk_ingest: Option<BulkIngestAnswers>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub business_events: Option<BusinessEventsAnswers>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusinessEventsAnswers {
+    pub name: String,
+    #[serde(default)]
+    pub events: Vec<EventDecl>,
+    #[serde(default)]
+    pub triggers: Vec<TriggerDecl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventDecl {
+    pub domain: String,
+    pub name: String,
+    pub schema_version: String,
+    #[serde(default)]
+    pub payload_fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerDecl {
+    pub id: String,
+    pub schedule: crate::business_events::schedule::TriggerSchedule,
+    pub emits: String,
+    #[serde(default)]
+    pub payload_template: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -994,6 +1024,7 @@ pub fn prompt_answers_with_llm(
         capability_answers: CapabilityAnswers {
             reconciliation,
             bulk_ingest,
+            business_events: None,
         },
         assumptions: Vec::new(),
     })
@@ -2450,6 +2481,32 @@ fn verify_reference_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn business_events_answers_roundtrips() {
+        use crate::business_events::schedule::{TimeOfDay, TriggerSchedule};
+        let a = BusinessEventsAnswers {
+            name: "rent".into(),
+            events: vec![EventDecl {
+                domain: "tenancy".into(),
+                name: "daily-rent-reminder".into(),
+                schema_version: "1".into(),
+                payload_fields: Default::default(),
+            }],
+            triggers: vec![TriggerDecl {
+                id: "daily_rent".into(),
+                schedule: TriggerSchedule::Daily {
+                    at: TimeOfDay { hour: 6, minute: 0 },
+                },
+                emits: "tenancy.daily-rent-reminder".into(),
+                payload_template: serde_json::json!({}),
+            }],
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["triggers"][0]["schedule"]["kind"], "daily");
+        let back: BusinessEventsAnswers = serde_json::from_value(v).unwrap();
+        assert_eq!(back.triggers[0].id, "daily_rent");
+    }
 
     #[test]
     fn parse_sorla_from_yaml_matches_file_load() {
