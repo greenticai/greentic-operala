@@ -1291,67 +1291,91 @@ pub fn prompt_answers_with_llm(
     })?;
     let capability = detect_capability(&args.prompt, llm)?;
 
-    let (extension, reconciliation, bulk_ingest, output_name) = match (capability, llm) {
-        ("reconciliation", Some(chat)) => {
-            let value = inference::infer_capability_answers(
-                chat,
-                EXTENSION_RECONCILIATION,
-                &RECONCILIATION_EXTENSION.answers_schema(),
-                &sorla,
-                &args.prompt,
-                None,
-            )?;
-            let reconciliation: ReconciliationAnswers =
-                serde_json::from_value(value).map_err(to_string)?;
-            (
-                EXTENSION_RECONCILIATION.to_string(),
-                Some(reconciliation.clone()),
-                None,
-                reconciliation.name.clone(),
-            )
-        }
-        ("bulk_ingest", Some(chat)) => {
-            let value = inference::infer_capability_answers(
-                chat,
-                EXTENSION_BULK_INGEST,
-                &BULK_INGEST_EXTENSION.answers_schema(),
-                &sorla,
-                &args.prompt,
-                None,
-            )?;
-            let bulk: BulkIngestAnswers = serde_json::from_value(value).map_err(to_string)?;
-            (
-                EXTENSION_BULK_INGEST.to_string(),
-                None,
-                Some(bulk.clone()),
-                bulk.name.clone(),
-            )
-        }
-        ("bulk_ingest", None) => {
-            let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
-            (
-                EXTENSION_BULK_INGEST.to_string(),
-                None,
-                Some(bulk.clone()),
-                bulk.name.clone(),
-            )
-        }
-        ("reconciliation", None) => {
-            let reconciliation = infer_reconciliation_answers(&sorla)?;
-            (
-                EXTENSION_RECONCILIATION.to_string(),
-                Some(reconciliation.clone()),
-                None,
-                reconciliation.name.clone(),
-            )
-        }
-        (other, None) => {
-            return Err(format!("unsupported capability '{other}'"));
-        }
-        (other, Some(_)) => {
-            return Err(format!("unsupported capability '{other}'"));
-        }
-    };
+    let (extension, reconciliation, bulk_ingest, business_events, output_name) =
+        match (capability, llm) {
+            ("reconciliation", Some(chat)) => {
+                let value = inference::infer_capability_answers(
+                    chat,
+                    EXTENSION_RECONCILIATION,
+                    &RECONCILIATION_EXTENSION.answers_schema(),
+                    &sorla,
+                    &args.prompt,
+                    None,
+                )?;
+                let reconciliation: ReconciliationAnswers =
+                    serde_json::from_value(value).map_err(to_string)?;
+                (
+                    EXTENSION_RECONCILIATION.to_string(),
+                    Some(reconciliation.clone()),
+                    None,
+                    None,
+                    reconciliation.name.clone(),
+                )
+            }
+            ("bulk_ingest", Some(chat)) => {
+                let value = inference::infer_capability_answers(
+                    chat,
+                    EXTENSION_BULK_INGEST,
+                    &BULK_INGEST_EXTENSION.answers_schema(),
+                    &sorla,
+                    &args.prompt,
+                    None,
+                )?;
+                let bulk: BulkIngestAnswers = serde_json::from_value(value).map_err(to_string)?;
+                (
+                    EXTENSION_BULK_INGEST.to_string(),
+                    None,
+                    Some(bulk.clone()),
+                    None,
+                    bulk.name.clone(),
+                )
+            }
+            ("business_events", Some(chat)) => {
+                let value = inference::infer_capability_answers(
+                    chat,
+                    EXTENSION_BUSINESS_EVENTS,
+                    &BUSINESS_EVENTS_EXTENSION.answers_schema(),
+                    &sorla,
+                    &args.prompt,
+                    None,
+                )?;
+                let business_events: BusinessEventsAnswers =
+                    serde_json::from_value(value).map_err(to_string)?;
+                (
+                    EXTENSION_BUSINESS_EVENTS.to_string(),
+                    None,
+                    None,
+                    Some(business_events.clone()),
+                    business_events.name.clone(),
+                )
+            }
+            ("bulk_ingest", None) => {
+                let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
+                (
+                    EXTENSION_BULK_INGEST.to_string(),
+                    None,
+                    Some(bulk.clone()),
+                    None,
+                    bulk.name.clone(),
+                )
+            }
+            ("reconciliation", None) => {
+                let reconciliation = infer_reconciliation_answers(&sorla)?;
+                (
+                    EXTENSION_RECONCILIATION.to_string(),
+                    Some(reconciliation.clone()),
+                    None,
+                    None,
+                    reconciliation.name.clone(),
+                )
+            }
+            (other, None) => {
+                return Err(format!("unsupported capability '{other}'"));
+            }
+            (other, Some(_)) => {
+                return Err(format!("unsupported capability '{other}'"));
+            }
+        };
     let work_dir = PathBuf::from(format!("target/operala/{output_name}"));
     let gtpack_file_name = format!("{}.gtpack", output_name.replace('_', "-"));
     Ok(OperalaAnswers {
@@ -1382,7 +1406,7 @@ pub fn prompt_answers_with_llm(
         capability_answers: CapabilityAnswers {
             reconciliation,
             bulk_ingest,
-            business_events: None,
+            business_events,
         },
         assumptions: Vec::new(),
     })
