@@ -143,10 +143,16 @@ pub fn validate_capability_answers(
                 if !seen_trigger_ids.insert(trigger.id.clone()) {
                     errors.push(format!("duplicate trigger id '{}'", trigger.id));
                 }
-                // Range checks via the vendored schedule validator.
-                errors.extend(crate::business_events::schedule::validate_schedule(
-                    &trigger.schedule,
-                ));
+                // Full trigger validation (id slug, schedule ranges, emits format).
+                let def = greentic_triggers::TriggerDef {
+                    id: trigger.id.clone(),
+                    schedule: trigger.schedule.clone(),
+                    emits: trigger.emits.clone(),
+                    payload_template: trigger.payload_template.clone(),
+                };
+                if let Err(errs) = greentic_triggers::validate_trigger(&def) {
+                    errors.extend(errs);
+                }
                 // `emits` must resolve to a declared event.
                 let emits_declared = crate::resolve_business_event_ref(&trigger.emits)
                     .is_some_and(|dotted| declared.contains(&dotted));

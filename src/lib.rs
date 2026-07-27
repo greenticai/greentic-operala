@@ -32,7 +32,6 @@ mod embedded_i18n {
     include!(concat!(env!("OUT_DIR"), "/embedded_i18n.rs"));
 }
 
-pub mod business_events;
 pub mod inference;
 
 /// Re-export the core LLM message types used by `inference::ChatFn`.
@@ -295,7 +294,7 @@ pub struct EventDecl {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerDecl {
     pub id: String,
-    pub schedule: crate::business_events::schedule::TriggerSchedule,
+    pub schedule: greentic_triggers::TriggerSchedule,
     pub emits: String,
     #[serde(default)]
     pub payload_template: Value,
@@ -871,8 +870,8 @@ impl OperaLaExtension for BusinessEventsExtension {
                 "minute": { "type": "integer", "minimum": 0, "maximum": 59 }
             }
         });
-        // Tagged union on `kind`, matching the vendored `TriggerSchedule` serde shape
-        // (src/business_events/schedule.rs) byte-for-byte.
+        // Tagged union on `kind`, matching `greentic_triggers::TriggerSchedule`'s
+        // serde shape (the schema the LLM must emit).
         let schedule_schema = json!({
             "type": "object",
             "description": "A recurrence schedule, a one-shot, or a raw cron escape hatch.",
@@ -1028,8 +1027,16 @@ impl OperaLaExtension for BusinessEventsExtension {
         }
 
         for trigger in &be.triggers {
-            for error in crate::business_events::schedule::validate_schedule(&trigger.schedule) {
-                missing.push(format!("trigger `{}` schedule: {error}", trigger.id));
+            let def = greentic_triggers::TriggerDef {
+                id: trigger.id.clone(),
+                schedule: trigger.schedule.clone(),
+                emits: trigger.emits.clone(),
+                payload_template: trigger.payload_template.clone(),
+            };
+            if let Err(errors) = greentic_triggers::validate_trigger(&def) {
+                for error in errors {
+                    missing.push(format!("trigger `{}`: {error}", trigger.id));
+                }
             }
 
             match resolve_business_event_ref(&trigger.emits) {
@@ -2932,7 +2939,7 @@ mod tests {
 
     #[test]
     fn business_events_answers_roundtrips() {
-        use crate::business_events::schedule::{TimeOfDay, TriggerSchedule};
+        use greentic_triggers::{TimeOfDay, TriggerSchedule};
         let a = BusinessEventsAnswers {
             name: "rent".into(),
             events: vec![EventDecl {
@@ -3853,7 +3860,7 @@ mod tests {
     }
 
     fn sample_business_events_answers() -> OperalaAnswers {
-        use crate::business_events::schedule::TriggerSchedule;
+        use greentic_triggers::TriggerSchedule;
 
         OperalaAnswers {
             schema: ANSWERS_SCHEMA.to_string(),
