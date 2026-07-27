@@ -47,6 +47,7 @@ pub const HANDOFF_SCHEMA: &str = "greentic.operala.handoff.v1";
 pub const READINESS_SCHEMA: &str = "greentic.operala.readiness.v1";
 pub const EXTENSION_RECONCILIATION: &str = "greentic.operala.reconciliation.v1";
 pub const EXTENSION_BULK_INGEST: &str = "greentic.operala.bulk_ingest.v1";
+pub const EXTENSION_BUSINESS_EVENTS: &str = "business_events";
 
 const WIZARD_STAGES: &[&str] = &[
     "load_answers",
@@ -407,6 +408,7 @@ pub trait OperaLaExtension {
 
 static RECONCILIATION_EXTENSION: ReconciliationExtension = ReconciliationExtension;
 static BULK_INGEST_EXTENSION: bulk_ingest::BulkIngestExtension = bulk_ingest::BulkIngestExtension;
+static BUSINESS_EVENTS_EXTENSION: BusinessEventsExtension = BusinessEventsExtension;
 
 pub struct ExtensionRegistry;
 
@@ -419,12 +421,17 @@ impl ExtensionRegistry {
         match id {
             EXTENSION_RECONCILIATION => Some(&RECONCILIATION_EXTENSION),
             EXTENSION_BULK_INGEST => Some(&BULK_INGEST_EXTENSION),
+            EXTENSION_BUSINESS_EVENTS => Some(&BUSINESS_EVENTS_EXTENSION),
             _ => None,
         }
     }
 
     pub fn all(&self) -> Vec<&'static dyn OperaLaExtension> {
-        vec![&RECONCILIATION_EXTENSION, &BULK_INGEST_EXTENSION]
+        vec![
+            &RECONCILIATION_EXTENSION,
+            &BULK_INGEST_EXTENSION,
+            &BUSINESS_EVENTS_EXTENSION,
+        ]
     }
 }
 
@@ -813,6 +820,359 @@ fn check_named_or_candidates(
     } else {
         missing.push(format!("{key} `{expected}`"));
     }
+}
+
+pub struct BusinessEventsExtension;
+
+impl OperaLaExtension for BusinessEventsExtension {
+    fn id(&self) -> &'static str {
+        EXTENSION_BUSINESS_EVENTS
+    }
+
+    fn capability(&self) -> &'static str {
+        "business_events"
+    }
+
+    fn version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    fn qa_schema(&self) -> Value {
+        json!({
+            "schema": "greentic.qa.schema.v1",
+            "flow": "operala.business_events",
+            "sections": [
+                {
+                    "id": "business_events.catalog",
+                    "title": "Event catalog",
+                    "questions": [
+                        {"id": "name", "kind": "text", "required": true},
+                        {"id": "events", "kind": "list", "required": true}
+                    ]
+                },
+                {
+                    "id": "business_events.triggers",
+                    "title": "Triggers",
+                    "questions": [
+                        {"id": "triggers", "kind": "list", "required": false}
+                    ]
+                }
+            ]
+        })
+    }
+
+    fn answers_schema(&self) -> Value {
+        let time_of_day = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hour", "minute"],
+            "properties": {
+                "hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+                "minute": { "type": "integer", "minimum": 0, "maximum": 59 }
+            }
+        });
+        // Tagged union on `kind`, matching the vendored `TriggerSchedule` serde shape
+        // (src/business_events/schedule.rs) byte-for-byte.
+        let schedule_schema = json!({
+            "type": "object",
+            "description": "A recurrence schedule, a one-shot, or a raw cron escape hatch.",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": { "kind": { "const": "every_minute" } }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "minute"],
+                    "properties": {
+                        "kind": { "const": "hourly" },
+                        "minute": { "type": "integer", "minimum": 0, "maximum": 59 }
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "at"],
+                    "properties": {
+                        "kind": { "const": "daily" },
+                        "at": time_of_day.clone()
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "day", "at"],
+                    "properties": {
+                        "kind": { "const": "weekly" },
+                        "day": { "enum": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] },
+                        "at": time_of_day.clone()
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "day", "at"],
+                    "properties": {
+                        "kind": { "const": "monthly" },
+                        "day": { "type": "integer", "minimum": 1, "maximum": 31 },
+                        "at": time_of_day.clone()
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "month", "day", "at"],
+                    "properties": {
+                        "kind": { "const": "yearly" },
+                        "month": { "type": "integer", "minimum": 1, "maximum": 12 },
+                        "day": { "type": "integer", "minimum": 1, "maximum": 31 },
+                        "at": time_of_day.clone()
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "datetime"],
+                    "properties": {
+                        "kind": { "const": "once_at" },
+                        "datetime": { "type": "string", "format": "date-time" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "expr"],
+                    "properties": {
+                        "kind": { "const": "cron" },
+                        "expr": { "type": "string", "minLength": 1 }
+                    }
+                }
+            ]
+        });
+
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "events", "triggers"],
+            "properties": {
+                "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "events": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["domain", "name", "schema_version"],
+                        "properties": {
+                            "domain": { "type": "string", "minLength": 1 },
+                            "name": { "type": "string", "minLength": 1 },
+                            "schema_version": { "type": "string", "minLength": 1 },
+                            "payload_fields": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } }
+                        }
+                    }
+                },
+                "triggers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["id", "schedule", "emits"],
+                        "properties": {
+                            "id": { "type": "string", "minLength": 1 },
+                            "schedule": schedule_schema,
+                            "emits": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "A declared event reference: `domain.name` or `cap://greentic/events/{domain}/{name}`."
+                            },
+                            "payload_template": {}
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn analyse_sorla(
+        &self,
+        _sorla: &SorlaContract,
+        answers: &OperalaAnswers,
+    ) -> OperalaResult<ReadinessReport> {
+        let be = answers
+            .capability_answers
+            .business_events
+            .as_ref()
+            .ok_or_else(|| "missing capability_answers.business_events".to_string())?;
+
+        let mut found = BTreeMap::new();
+        let mut missing = Vec::new();
+        let mut warnings = Vec::new();
+
+        let declared_events: Vec<String> = be
+            .events
+            .iter()
+            .map(|event| format!("{}.{}", event.domain, event.name))
+            .collect();
+
+        if be.events.is_empty() {
+            warnings.push("no events declared; triggers cannot emit anything".to_string());
+        }
+        if be.triggers.is_empty() {
+            warnings.push(
+                "no triggers declared; the event catalog will never be produced automatically"
+                    .to_string(),
+            );
+        }
+
+        for trigger in &be.triggers {
+            for error in crate::business_events::schedule::validate_schedule(&trigger.schedule) {
+                missing.push(format!("trigger `{}` schedule: {error}", trigger.id));
+            }
+
+            match resolve_business_event_ref(&trigger.emits) {
+                Some(key) if declared_events.contains(&key) => {
+                    found.insert(format!("trigger.{}.emits", trigger.id), Value::String(key));
+                }
+                Some(key) => {
+                    missing.push(format!(
+                        "trigger `{}` emits `{key}`, which is not declared in events",
+                        trigger.id
+                    ));
+                }
+                None => {
+                    missing.push(format!(
+                        "trigger `{}` has an unparseable `emits` reference `{}`",
+                        trigger.id, trigger.emits
+                    ));
+                }
+            }
+        }
+
+        let status = if missing.is_empty() {
+            ReadinessStatus::Ready
+        } else {
+            ReadinessStatus::NeedsSorlaChanges
+        };
+        let summary = match status {
+            ReadinessStatus::Ready => {
+                "Business events handoff can be generated: every trigger emits a declared event"
+                    .to_string()
+            }
+            ReadinessStatus::NeedsSorlaChanges => {
+                "Business events needs fixes: some triggers reference undeclared events or invalid schedules"
+                    .to_string()
+            }
+            ReadinessStatus::UnsafeOrAmbiguous => {
+                "Business events has ambiguous event bindings".to_string()
+            }
+        };
+
+        Ok(ReadinessReport {
+            schema: READINESS_SCHEMA.to_string(),
+            capability: "business_events".to_string(),
+            status,
+            found,
+            missing,
+            warnings,
+            summary,
+        })
+    }
+
+    fn build_handoff(
+        &self,
+        sorla: &SorlaContract,
+        answers: &OperalaAnswers,
+        readiness: &ReadinessReport,
+    ) -> OperalaResult<OperaLaHandoff> {
+        let be = answers
+            .capability_answers
+            .business_events
+            .as_ref()
+            .ok_or_else(|| "missing capability_answers.business_events".to_string())?;
+
+        let mut schemas = BTreeMap::new();
+        for event in &be.events {
+            schemas.insert(
+                format!("{}-{}", event.domain, event.name),
+                business_event_payload_schema(event),
+            );
+        }
+
+        Ok(OperaLaHandoff {
+            schema: HANDOFF_SCHEMA.to_string(),
+            capability: "business_events".to_string(),
+            extension: self.id().to_string(),
+            extension_version: self.version().to_string(),
+            tenant_required: true,
+            team_optional: true,
+            sorla: HandoffSorla {
+                source: sorla.source.clone(),
+                source_digest: sorla.source_digest.clone(),
+                parser: "greentic-sorla-lib".to_string(),
+                required_schema: "greentic.sorla.v0.2".to_string(),
+                package_name: sorla.package_name.clone(),
+                package_version: sorla.package_version.clone(),
+            },
+            sorx: SorxBindingTemplate {
+                transport: "http".to_string(),
+                url: "runtime-provided".to_string(),
+            },
+            bindings: json!({
+                "name": be.name,
+                "events": be.events,
+                "triggers": be.triggers,
+                "source_digest": sorla.source_digest,
+            }),
+            input_modes: vec!["event".to_string()],
+            schemas,
+            flows: vec!["business-event-trigger.flow.yaml".to_string()],
+            ui: Vec::new(),
+            tests: vec!["business-events.sample.json".to_string()],
+            readiness: readiness.clone(),
+        })
+    }
+}
+
+/// Resolve a trigger's `emits` field to a normalized `domain.name` key.
+/// Accepts either the dotted form (`domain.name`) or the capability-URI form
+/// (`cap://greentic/events/{domain}/{name}`). Returns `None` when neither shape matches.
+fn resolve_business_event_ref(emits: &str) -> Option<String> {
+    if let Some(rest) = emits.strip_prefix("cap://greentic/events/") {
+        let mut parts = rest.splitn(2, '/');
+        let domain = parts.next()?;
+        let name = parts.next()?;
+        if domain.is_empty() || name.is_empty() {
+            return None;
+        }
+        return Some(format!("{domain}.{name}"));
+    }
+    let (domain, name) = emits.split_once('.')?;
+    if domain.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(format!("{domain}.{name}"))
+}
+
+fn business_event_payload_schema(event: &EventDecl) -> Value {
+    let properties = event
+        .payload_fields
+        .iter()
+        .map(|(field, description)| (field.clone(), json!({ "description": description })))
+        .collect::<serde_json::Map<_, _>>();
+    let required = event.payload_fields.keys().cloned().collect::<Vec<_>>();
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": format!(
+            "https://greentic.ai/schemas/operala.business-events.{}.{}.v{}.json",
+            event.domain, event.name, event.schema_version
+        ),
+        "type": "object",
+        "required": required,
+        "properties": properties
+    })
 }
 
 #[cfg(feature = "cli")]
@@ -1215,10 +1575,10 @@ pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
         .clone()
         .unwrap_or_else(|| work_dir_gtpack_path.clone());
     if primary_gtpack_path == work_dir_gtpack_path {
-        write_operala_gtpack(&primary_gtpack_path, &handoff)?;
+        write_operala_gtpack(&primary_gtpack_path, &handoff, answers)?;
     } else {
-        write_operala_gtpack(&primary_gtpack_path, &handoff)?;
-        write_operala_gtpack(&work_dir_gtpack_path, &handoff)?;
+        write_operala_gtpack(&primary_gtpack_path, &handoff, answers)?;
+        write_operala_gtpack(&work_dir_gtpack_path, &handoff, answers)?;
     }
     write_wizard_state(
         &state_path,
@@ -1923,7 +2283,17 @@ fn write_handoff_assets(work_dir: &Path, handoff: &OperaLaHandoff) -> OperalaRes
 
 /// Assemble a [`PackBuilder`] from the given handoff — no filesystem I/O.
 /// Available on all targets (native and wasm32).
-fn build_operala_pack_builder(handoff: &OperaLaHandoff) -> OperalaResult<PackBuilder> {
+///
+/// `answers` is optional: when present and `handoff.capability == "business_events"`,
+/// the declared triggers/events are additionally chained onto the manifest as inline
+/// `greentic.triggers.v1` / `greentic.business-events.v1` extensions (the shape the
+/// greentic-start scheduler and business-events runtime read). Callers that only have
+/// a handoff (no answers in scope) may pass `None`; the pack still builds, just without
+/// those two inline extensions.
+fn build_operala_pack_builder(
+    handoff: &OperaLaHandoff,
+    answers: Option<&OperalaAnswers>,
+) -> OperalaResult<PackBuilder> {
     let pack_name = format!(
         "{}-{}",
         handoff.sorla.package_name,
@@ -2036,22 +2406,66 @@ fn build_operala_pack_builder(handoff: &OperaLaHandoff) -> OperalaResult<PackBui
             serde_json::to_vec_pretty(schema).map_err(to_string)?,
         );
     }
+
+    if handoff.capability == "business_events"
+        && let Some(be) = answers.and_then(|a| a.capability_answers.business_events.as_ref())
+    {
+        let triggers_payload = json!({
+            "triggers": be.triggers.iter().map(|t| json!({
+                "id": t.id,
+                "schedule": t.schedule,
+                "emits": t.emits,
+                "payload_template": t.payload_template,
+            })).collect::<Vec<_>>()
+        });
+        let events_payload = json!({
+            "events": be.events.iter().map(|e| json!({
+                "domain": e.domain,
+                "name": e.name,
+                "schema_version": e.schema_version,
+                "payload_fields": e.payload_fields,
+            })).collect::<Vec<_>>()
+        });
+        builder = builder
+            .with_inline_extension(
+                "greentic.triggers.v1",
+                "greentic.triggers.v1",
+                BUSINESS_EVENTS_EXTENSION.version(),
+                triggers_payload,
+            )
+            .with_inline_extension(
+                "greentic.business-events.v1",
+                "greentic.business-events.v1",
+                BUSINESS_EVENTS_EXTENSION.version(),
+                events_payload,
+            );
+    }
+
     Ok(builder)
 }
 
 /// Returns the in-memory file set (archive path → bytes) that would be written into a `.gtpack`.
 /// Includes `manifest.cbor`, `manifest.json`, `provenance.json`, `sbom.json`, and all assets.
 /// No filesystem I/O — available on all targets (native and wasm32).
+///
+/// NOTE: does not receive `answers`, so `business_events` packs built via this entrypoint
+/// (e.g. the wasm designer-extension path) do not get the inline `greentic.triggers.v1` /
+/// `greentic.business-events.v1` extensions — only [`write_operala_gtpack`] (native, driven
+/// by `run_wizard`) does. See `build_operala_pack_builder`'s `answers` parameter.
 pub fn build_operala_pack_entries(
     handoff: &OperaLaHandoff,
 ) -> OperalaResult<Vec<(String, Vec<u8>)>> {
-    let builder = build_operala_pack_builder(handoff)?;
+    let builder = build_operala_pack_builder(handoff, None)?;
     let map = builder.entries().map_err(to_string)?;
     Ok(map.into_iter().collect())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<()> {
+fn write_operala_gtpack(
+    path: &Path,
+    handoff: &OperaLaHandoff,
+    answers: &OperalaAnswers,
+) -> OperalaResult<()> {
     if path.is_file() {
         fs::remove_file(path)
             .map_err(|err| format!("failed to replace pack file {}: {err}", path.display()))?;
@@ -2067,7 +2481,7 @@ fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<
         fs::create_dir_all(parent)
             .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
     }
-    let builder = build_operala_pack_builder(handoff)?;
+    let builder = build_operala_pack_builder(handoff, Some(answers))?;
     builder.build(path).map_err(to_string)?;
     Ok(())
 }
@@ -3372,5 +3786,129 @@ mod tests {
         RECONCILIATION_EXTENSION
             .build_handoff(&sorla, &answers, &readiness)
             .expect("handoff builds")
+    }
+
+    #[test]
+    fn business_events_extension_registered_and_schema_tagged_union() {
+        let reg = ExtensionRegistry::built_in();
+        let ext = reg.get(EXTENSION_BUSINESS_EVENTS).expect("registered");
+        assert_eq!(ext.capability(), "business_events");
+        let s = serde_json::to_string(&ext.answers_schema()).unwrap();
+        assert!(
+            s.contains("\"kind\""),
+            "schedule schema must be a tagged union on kind"
+        );
+    }
+
+    fn sample_business_events_sorla() -> SorlaContract {
+        SorlaContract {
+            source: SourceRef {
+                kind: SourceKind::File,
+                uri: "business-events/examples/tenancy/sorla.yaml".to_string(),
+                digest: None,
+            },
+            source_digest: "sha256:business-events-test".to_string(),
+            package_name: "tenancy".to_string(),
+            package_version: "0.1.0".to_string(),
+            records: Vec::new(),
+            events: Vec::new(),
+            actions: Vec::new(),
+            agent_endpoints: Vec::new(),
+            raw_yaml: String::new(),
+        }
+    }
+
+    fn sample_business_events_answers() -> OperalaAnswers {
+        use crate::business_events::schedule::TriggerSchedule;
+
+        OperalaAnswers {
+            schema: ANSWERS_SCHEMA.to_string(),
+            intent: "author business events".to_string(),
+            detected_capability: Some("business_events".to_string()),
+            extension: EXTENSION_BUSINESS_EVENTS.to_string(),
+            locale: Some("en-GB".to_string()),
+            tenant: Some("acme".to_string()),
+            team: None,
+            sorla: SorlaRef {
+                source: SourceRef {
+                    kind: SourceKind::File,
+                    uri: "business-events/examples/tenancy/sorla.yaml".to_string(),
+                    digest: None,
+                },
+                expected_schema: None,
+            },
+            outputs: OutputConfig {
+                handoff_path: None,
+                gtpack_path: None,
+                work_dir: std::env::temp_dir(),
+            },
+            approval: ApprovalConfig::default(),
+            capability_answers: CapabilityAnswers {
+                reconciliation: None,
+                bulk_ingest: None,
+                business_events: Some(BusinessEventsAnswers {
+                    name: "rent".to_string(),
+                    events: vec![EventDecl {
+                        domain: "tenancy".to_string(),
+                        name: "daily-rent-reminder".to_string(),
+                        schema_version: "1".to_string(),
+                        payload_fields: BTreeMap::new(),
+                    }],
+                    triggers: vec![TriggerDecl {
+                        id: "daily_rent".to_string(),
+                        schedule: TriggerSchedule::EveryMinute,
+                        emits: "tenancy.daily-rent-reminder".to_string(),
+                        payload_template: json!({}),
+                    }],
+                }),
+            },
+            assumptions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn business_events_handoff_writes_inline_triggers_and_events_into_manifest() {
+        use std::io::Read;
+
+        let sorla = sample_business_events_sorla();
+        let answers = sample_business_events_answers();
+        let readiness = BUSINESS_EVENTS_EXTENSION
+            .analyse_sorla(&sorla, &answers)
+            .expect("readiness succeeds");
+        assert_eq!(readiness.status, ReadinessStatus::Ready);
+        let handoff = BUSINESS_EVENTS_EXTENSION
+            .build_handoff(&sorla, &answers, &readiness)
+            .expect("handoff builds");
+
+        let pack_path = std::env::temp_dir().join(format!(
+            "operala-business-events-manifest-test-{}.gtpack",
+            std::process::id()
+        ));
+        write_operala_gtpack(&pack_path, &handoff, &answers).expect("pack writes");
+
+        let file = fs::File::open(&pack_path).expect("pack opens");
+        let mut archive = zip::ZipArchive::new(file).expect("pack is a zip archive");
+        let mut manifest_bytes = Vec::new();
+        {
+            let mut entry = archive
+                .by_name("manifest.cbor")
+                .expect("manifest.cbor present");
+            entry
+                .read_to_end(&mut manifest_bytes)
+                .expect("read manifest.cbor");
+        }
+        let manifest: Value =
+            serde_cbor::from_slice(&manifest_bytes).expect("manifest.cbor decodes");
+
+        assert_eq!(
+            manifest["extensions"]["greentic.triggers.v1"]["inline"]["triggers"][0]["id"],
+            "daily_rent"
+        );
+        assert_eq!(
+            manifest["extensions"]["greentic.business-events.v1"]["inline"]["events"][0]["domain"],
+            "tenancy"
+        );
+
+        let _ = fs::remove_file(&pack_path);
     }
 }
