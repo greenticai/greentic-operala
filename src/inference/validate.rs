@@ -3,10 +3,11 @@
 //! this module disposes.
 
 use crate::{
-    BulkIngestAnswers, EXTENSION_BULK_INGEST, EXTENSION_RECONCILIATION, ReconciliationAnswers,
-    SorlaContract,
+    BulkIngestAnswers, BusinessEventsAnswers, EXTENSION_BULK_INGEST, EXTENSION_BUSINESS_EVENTS,
+    EXTENSION_RECONCILIATION, ReconciliationAnswers, SorlaContract,
 };
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 fn check_membership(
     errors: &mut Vec<String>,
@@ -109,6 +110,54 @@ pub fn validate_capability_answers(
                 );
             }
         }
+        EXTENSION_BUSINESS_EVENTS => {
+            let answers: BusinessEventsAnswers = match serde_json::from_value(value.clone()) {
+                Ok(answers) => answers,
+                Err(err) => return Err(vec![format!("answers shape invalid: {err}")]),
+            };
+
+            // Declared events, keyed on the dotted `domain.name` form so
+            // trigger `emits` bindings can be checked against them below.
+            let declared: BTreeSet<String> = answers
+                .events
+                .iter()
+                .map(|event| format!("{}.{}", event.domain, event.name))
+                .collect();
+            for event in &answers.events {
+                if event.domain.trim().is_empty() || event.name.trim().is_empty() {
+                    errors.push(format!(
+                        "event '{}.{}' must have non-empty domain and name",
+                        event.domain, event.name
+                    ));
+                }
+                if event.schema_version.trim().is_empty() {
+                    errors.push(format!(
+                        "event '{}.{}' missing schema_version",
+                        event.domain, event.name
+                    ));
+                }
+            }
+
+            let mut seen_trigger_ids = BTreeSet::new();
+            for trigger in &answers.triggers {
+                if !seen_trigger_ids.insert(trigger.id.clone()) {
+                    errors.push(format!("duplicate trigger id '{}'", trigger.id));
+                }
+                // Range checks via the vendored schedule validator.
+                errors.extend(crate::business_events::schedule::validate_schedule(
+                    &trigger.schedule,
+                ));
+                // `emits` must resolve to a declared event.
+                let emits_declared = crate::resolve_business_event_ref(&trigger.emits)
+                    .is_some_and(|dotted| declared.contains(&dotted));
+                if !emits_declared {
+                    errors.push(format!(
+                        "trigger '{}' emits '{}' which is not a declared event",
+                        trigger.id, trigger.emits
+                    ));
+                }
+            }
+        }
         other => errors.push(format!("unknown extension '{other}'")),
     }
     if errors.is_empty() {
@@ -198,5 +247,34 @@ mod tests {
         let errors = validate_capability_answers("greentic.operala.nope.v1", &Value::Null, &sorla)
             .unwrap_err();
         assert!(errors[0].contains("unknown extension"), "got: {errors:?}");
+    }
+
+    #[test]
+    fn business_events_reports_duplicate_id_bad_minute_and_dangling_emits() {
+        let sorla = fixture_sorla();
+        let value = serde_json::json!({
+            "name": "invoicing",
+            "events": [
+                { "domain": "invoice", "name": "created", "schema_version": "1" }
+            ],
+            "triggers": [
+                {
+                    "id": "",
+                    "schedule": { "kind": "hourly", "minute": 90 },
+                    "emits": "invoice.created"
+                },
+                {
+                    "id": "",
+                    "schedule": { "kind": "every_minute" },
+                    "emits": "invoice.nonexistent"
+                }
+            ]
+        });
+        let errors =
+            validate_capability_answers(EXTENSION_BUSINESS_EVENTS, &value, &sorla).unwrap_err();
+        let joined = errors.join(" | ");
+        assert!(joined.contains("id"), "got: {errors:?}");
+        assert!(joined.contains("minute"), "got: {errors:?}");
+        assert!(joined.contains("emits"), "got: {errors:?}");
     }
 }
