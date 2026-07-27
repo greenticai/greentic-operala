@@ -1141,9 +1141,7 @@ impl OperaLaExtension for BusinessEventsExtension {
 /// (`cap://greentic/events/{domain}/{name}`). Returns `None` when neither shape matches.
 fn resolve_business_event_ref(emits: &str) -> Option<String> {
     if let Some(rest) = emits.strip_prefix("cap://greentic/events/") {
-        let mut parts = rest.splitn(2, '/');
-        let domain = parts.next()?;
-        let name = parts.next()?;
+        let (domain, name) = rest.split_once('/')?;
         if domain.is_empty() || name.is_empty() {
             return None;
         }
