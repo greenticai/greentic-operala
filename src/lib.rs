@@ -1432,12 +1432,24 @@ fn detect_capability(
     {
         return Ok("reconciliation");
     }
+    if lower_prompt.contains("trigger")
+        || lower_prompt.contains("emit ")
+        || lower_prompt.contains("business event")
+        || lower_prompt.contains("every morning")
+        || lower_prompt.contains("every day")
+        || lower_prompt.contains("every hour")
+        || lower_prompt.contains("every week")
+        || lower_prompt.contains("reminder")
+    {
+        return Ok("business_events");
+    }
     if let Some(chat) = llm
         && let Some(capability) = inference::classify_capability(chat, prompt)?
     {
         return Ok(match capability.as_str() {
             "reconciliation" => "reconciliation",
             "bulk_ingest" => "bulk_ingest",
+            "business_events" => "business_events",
             _ => {
                 return Err(follow_up_required(&format!(
                     "the LLM classified this as '{capability}', which OperaLa does not author; which operational capability should it use for this SoRLa contract?"
