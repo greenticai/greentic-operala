@@ -17,10 +17,22 @@ jobs:
         with:
           tool: cargo-binstall
       - name: Install coverage tooling
+        # GITHUB_TOKEN: unauthenticated binstall hits the api.github.com rate limit
+        # (shared per runner IP). On a 403 binstall does not fail -- it silently falls
+        # back to building from source via `cargo install <tool>` WITHOUT `--locked`,
+        # and cargo-nextest carries a deliberate `compile_error!` rejecting exactly that.
+        # --disable-strategies compile: make that fallback impossible, so a registry or
+        # rate-limit problem fails loudly here instead of surfacing as a confusing
+        # compile error. All three tools publish prebuilt binaries, so this is safe.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cargo binstall -y --force cargo-llvm-cov
-          cargo binstall -y --force cargo-nextest
-          cargo binstall -y --force greentic-dev
+          cargo binstall -y --force --disable-strategies compile cargo-llvm-cov
+          cargo binstall -y --force --disable-strategies compile cargo-nextest
+          cargo binstall -y --force --disable-strategies compile greentic-dev
+          command -v cargo-llvm-cov
+          command -v cargo-nextest
+          command -v greentic-dev
       - uses: Swatinem/rust-cache@v2
       - name: Run coverage and enforce policy
         run: greentic-dev coverage
