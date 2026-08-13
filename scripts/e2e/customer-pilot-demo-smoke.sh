@@ -12,8 +12,11 @@ run_cmd() {
 run_cmd bash scripts/validate_codex_material.sh
 
 if ! command -v greentic-operax >/dev/null 2>&1; then
-  echo "greentic-operax is required on PATH. Install it with: cargo binstall greentic-operax" >&2
-  exit 1
+  # greentic-operax is not yet published/shipped (it carries git deps that block a
+  # crates.io release); skip the pilot smoke gracefully rather than hard-failing,
+  # mirroring the operax.yml integration workflow's "skip until it ships" stance.
+  echo "greentic-operax not on PATH; skipping customer-pilot smoke (operax not yet shipped)." >&2
+  exit 0
 fi
 
 if [[ -d ../greentic-sorla ]]; then

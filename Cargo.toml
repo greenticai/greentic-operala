@@ -1,6 +1,6 @@
 [package]
 name = "greentic-operala"
-version = "0.1.1"
+version = "1.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/greenticai/greentic-operala"
@@ -18,19 +18,44 @@ bin-dir = "{ name }-v{ version }-{ target }"
 pkg-fmt = "tgz"
 bin = ["greentic-operala"]
 
+[features]
+# default enables CLI binary + native deps (clap, qa-lib)
+default = ["cli"]
+# cli feature gates clap, greentic-qa-lib, and the binary entry-point
+cli = ["dep:clap", "dep:greentic-qa-lib"]
+
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
+# clap: CLI-only; gated behind the `cli` feature
+clap = { version = "4.5", features = ["derive"], optional = true }
 blake3 = "1"
-greentic-pack = { package = "greentic-pack-lib", path = "../greentic-pack/crates/greentic-pack", version = "0.5" }
-greentic-qa-lib = "0.5"
+# greentic-llm: base import (types only); native-target table adds rig + clap features.
+greentic-llm = { version = "1.0.1", default-features = false }
+# greentic-pack: base import (types only, wasm-safe); native-target table adds native feature.
+greentic-pack = { package = "greentic-pack-lib", git = "https://github.com/greenticai/greentic-pack", rev = "3df14ca", default-features = false }
+# greentic-qa-lib: CLI/native-only wizard runner; gates behind `cli` feature (not wasm-safe).
+greentic-qa-lib = { git = "https://github.com/greenticai/greentic-qa", rev = "9203d8f", optional = true }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.11"
+# greentic-triggers: shared trigger schedule vocabulary + validator. Public
+# greentic-biz repo, pinned to a rev on greentic-types =1.3.0-research.2 (matches
+# this crate's pack/qa line) so it resolves without the .1-vs-.2 skew.
+greentic-triggers = { git = "https://github.com/greentic-biz/greentic-triggers", rev = "b72c7b8" }
+
+# Native-only heavy dependencies: LLM rig backend, pack native machinery, async runtime.
+# Cargo unions these features with the base [dependencies] entries above.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+greentic-llm = { version = "1.0.1", features = ["rig", "clap"] }
+greentic-pack = { package = "greentic-pack-lib", git = "https://github.com/greenticai/greentic-pack", rev = "3df14ca", features = ["native"] }
+tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
+greentic-llm = { version = "1.0.1", features = ["test-mock"] }
 zip = "8"
+# Decode manifest.cbor in pack-manifest assertion tests (matches greentic-pack's own pin).
+serde_cbor = "0.11"
 
 [lib]
 name = "greentic_operala"
@@ -39,3 +64,8 @@ path = "src/lib.rs"
 [[bin]]
 name = "greentic-operala"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[workspace]
+members = ["crates/greentic-operala-designer-extension"]
+
