@@ -29,7 +29,7 @@
     "tools": [
       {
         "name": "list_operala_capabilities",
-        "export": "invoke-tool",
+        "export": "greentic:extension-design/tools.invoke-tool",
         "capabilities": [
           "flow"
         ],
@@ -38,7 +38,7 @@
       },
       {
         "name": "generate_operala_answers",
-        "export": "invoke-tool",
+        "export": "greentic:extension-design/tools.invoke-tool",
         "capabilities": [
           "flow"
         ],
@@ -47,7 +47,7 @@
       },
       {
         "name": "update_operala_answers",
-        "export": "invoke-tool",
+        "export": "greentic:extension-design/tools.invoke-tool",
         "capabilities": [
           "flow"
         ],
@@ -56,7 +56,7 @@
       },
       {
         "name": "validate_operala_answers",
-        "export": "invoke-tool",
+        "export": "greentic:extension-design/tools.invoke-tool",
         "capabilities": [
           "flow"
         ],
@@ -65,7 +65,7 @@
       },
       {
         "name": "generate_handoff_pack",
-        "export": "invoke-tool",
+        "export": "greentic:extension-design/tools.invoke-tool",
         "capabilities": [
           "flow"
         ],
