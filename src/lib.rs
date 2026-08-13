@@ -1,16 +1,29 @@
-use clap::{Args, Parser, Subcommand};
-use greentic_pack::builder::{
-    FlowBundle, PACK_VERSION, PackBuilder, PackMeta, Provenance, Signing,
-};
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+// CLI-only: clap argument parsing
+#[cfg(feature = "cli")]
+use clap::{Args, Parser, Subcommand};
+
+// Pack builder types: available on all targets (wasm-compat shims in greentic-pack).
+use greentic_pack::builder::{
+    FlowBundle, PACK_VERSION, PackBuilder, PackMeta, Provenance, Signing,
+};
+use semver::Version;
+
+// Native-only: filesystem, environment, OsString
+#[cfg(not(target_arch = "wasm32"))]
 use std::env;
+// OsString is only used by CLI-entry-point helpers (cli feature).
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 use std::ffi::OsString;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 
 #[path = "../extensions/bulk-ingest/mod.rs"]
 mod bulk_ingest;
@@ -19,6 +32,13 @@ mod embedded_i18n {
     include!(concat!(env!("OUT_DIR"), "/embedded_i18n.rs"));
 }
 
+pub mod inference;
+
+/// Re-export the core LLM message types used by `inference::ChatFn`.
+/// Extension crates should import these via `greentic_operala::` rather than
+/// depending on `greentic-llm` directly.
+pub use greentic_llm::{ChatRequest, ChatResponse, FinishReason, LlmError, MessageRole};
+
 pub type OperalaResult<T> = Result<T, String>;
 
 pub const ANSWERS_SCHEMA: &str = "greentic.operala.answers.v1";
@@ -26,6 +46,7 @@ pub const HANDOFF_SCHEMA: &str = "greentic.operala.handoff.v1";
 pub const READINESS_SCHEMA: &str = "greentic.operala.readiness.v1";
 pub const EXTENSION_RECONCILIATION: &str = "greentic.operala.reconciliation.v1";
 pub const EXTENSION_BULK_INGEST: &str = "greentic.operala.bulk_ingest.v1";
+pub const EXTENSION_BUSINESS_EVENTS: &str = "business_events";
 
 const WIZARD_STAGES: &[&str] = &[
     "load_answers",
@@ -62,6 +83,7 @@ pub struct LocalCacheArtifactResolver {
 }
 
 impl LocalCacheArtifactResolver {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_env() -> Self {
         Self {
             root: env::var_os("OPERALA_DISTRIBUTOR_ROOT")
@@ -74,6 +96,7 @@ impl LocalCacheArtifactResolver {
         Self { root }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn resolve_sync(
         &self,
         reference: &str,
@@ -100,6 +123,7 @@ impl LocalCacheArtifactResolver {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ArtifactResolver for LocalCacheArtifactResolver {
     async fn resolve(
         &self,
@@ -111,6 +135,8 @@ impl ArtifactResolver for LocalCacheArtifactResolver {
     }
 }
 
+/// CLI entry-point parser — only available on native (cli feature).
+#[cfg(feature = "cli")]
 #[derive(Debug, Parser)]
 #[command(name = "greentic-operala")]
 #[command(about = "Author OperaLa operational handoff artifacts")]
@@ -119,34 +145,57 @@ pub struct OperalaCli {
     pub command: OperalaCommand,
 }
 
+/// CLI subcommands — only available on native (cli feature).
+#[cfg(feature = "cli")]
 #[derive(Debug, Subcommand)]
 pub enum OperalaCommand {
     Prompt(PromptArgs),
     Wizard(WizardArgs),
 }
 
-#[derive(Debug, Args)]
+/// Prompt command arguments — native-only (LLM resolution + file I/O).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+#[cfg_attr(feature = "cli", derive(Args))]
 pub struct PromptArgs {
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub sorla: String,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub locale: Option<String>,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub output: Option<PathBuf>,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub tenant: Option<String>,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub team: Option<String>,
+    /// LLM provider for inference (overrides GREENTIC_LLM_PROVIDER).
+    #[cfg_attr(feature = "cli", arg(long, value_enum))]
+    pub llm_provider: Option<greentic_llm::ProviderKind>,
+    /// LLM model id (overrides GREENTIC_LLM_MODEL).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub llm_model: Option<String>,
+    /// Force the deterministic keyword path even when an LLM is configured.
+    #[cfg_attr(feature = "cli", arg(long, default_value_t = false))]
+    pub no_llm: bool,
+    /// Existing answers.json to update (update mode; requires an LLM).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub existing: Option<PathBuf>,
+    /// Overwrite --existing in place instead of writing answers.updated.json.
+    #[cfg_attr(feature = "cli", arg(long, default_value_t = false))]
+    pub in_place: bool,
     pub prompt: String,
 }
 
-#[derive(Debug, Args)]
+/// Wizard command arguments — native-only (file I/O).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+#[cfg_attr(feature = "cli", derive(Args))]
 pub struct WizardArgs {
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub schema: bool,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub answers: Option<String>,
-    #[arg(long)]
+    #[cfg_attr(feature = "cli", arg(long))]
     pub locale: Option<String>,
 }
 
@@ -220,6 +269,35 @@ pub struct CapabilityAnswers {
     pub reconciliation: Option<ReconciliationAnswers>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bulk_ingest: Option<BulkIngestAnswers>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub business_events: Option<BusinessEventsAnswers>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusinessEventsAnswers {
+    pub name: String,
+    #[serde(default)]
+    pub events: Vec<EventDecl>,
+    #[serde(default)]
+    pub triggers: Vec<TriggerDecl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventDecl {
+    pub domain: String,
+    pub name: String,
+    pub schema_version: String,
+    #[serde(default)]
+    pub payload_fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerDecl {
+    pub id: String,
+    pub schedule: greentic_triggers::TriggerSchedule,
+    pub emits: String,
+    #[serde(default)]
+    pub payload_template: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,6 +388,10 @@ pub trait OperaLaExtension {
     fn capability(&self) -> &'static str;
     fn version(&self) -> &'static str;
     fn qa_schema(&self) -> Value;
+    /// JSON Schema for this extension's capability answers object. Handed to
+    /// the LLM as the `emit_answers` tool schema. Guidance for the model —
+    /// deterministic validation happens separately via serde + binding checks.
+    fn answers_schema(&self) -> Value;
     fn analyse_sorla(
         &self,
         sorla: &SorlaContract,
@@ -325,6 +407,7 @@ pub trait OperaLaExtension {
 
 static RECONCILIATION_EXTENSION: ReconciliationExtension = ReconciliationExtension;
 static BULK_INGEST_EXTENSION: bulk_ingest::BulkIngestExtension = bulk_ingest::BulkIngestExtension;
+static BUSINESS_EVENTS_EXTENSION: BusinessEventsExtension = BusinessEventsExtension;
 
 pub struct ExtensionRegistry;
 
@@ -337,12 +420,17 @@ impl ExtensionRegistry {
         match id {
             EXTENSION_RECONCILIATION => Some(&RECONCILIATION_EXTENSION),
             EXTENSION_BULK_INGEST => Some(&BULK_INGEST_EXTENSION),
+            EXTENSION_BUSINESS_EVENTS => Some(&BUSINESS_EVENTS_EXTENSION),
             _ => None,
         }
     }
 
     pub fn all(&self) -> Vec<&'static dyn OperaLaExtension> {
-        vec![&RECONCILIATION_EXTENSION, &BULK_INGEST_EXTENSION]
+        vec![
+            &RECONCILIATION_EXTENSION,
+            &BULK_INGEST_EXTENSION,
+            &BUSINESS_EVENTS_EXTENSION,
+        ]
     }
 }
 
@@ -424,6 +512,41 @@ impl OperaLaExtension for ReconciliationExtension {
 
     fn qa_schema(&self) -> Value {
         self.qa_schema_for_locale("en-GB")
+    }
+
+    fn answers_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "name", "source_event", "expected_record", "settlement_record",
+                "exception_record", "input_modes", "source_fields", "expected_fields",
+                "matching", "exception_policy", "actions", "agent_endpoints"
+            ],
+            "properties": {
+                "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "source_event": { "type": "string", "description": "A SoRLa event id from catalog.events — the incoming observed payment event." },
+                "expected_record": { "type": "string", "description": "A SoRLa record id from catalog.records — the expected obligation/invoice." },
+                "settlement_record": { "type": "string", "description": "A SoRLa record id from catalog.records — stores the settled payment." },
+                "exception_record": { "type": "string", "description": "A SoRLa record id from catalog.records — stores exceptions for manual review." },
+                "input_modes": { "type": "array", "items": { "enum": ["single", "batch"] }, "minItems": 1 },
+                "source_fields": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "expected_fields": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "matching": {
+                    "type": "object",
+                    "required": ["amount_tolerance", "date_window_days", "auto_match_threshold", "review_threshold"],
+                    "properties": {
+                        "amount_tolerance": { "type": "number", "minimum": 0 },
+                        "date_window_days": { "type": "integer", "minimum": 0 },
+                        "auto_match_threshold": { "type": "integer", "minimum": 0, "maximum": 100 },
+                        "review_threshold": { "type": "integer", "minimum": 0, "maximum": 100 }
+                    }
+                },
+                "exception_policy": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "actions": { "type": "object", "description": "operation → SoRLa action id from catalog.actions", "additionalProperties": { "type": "string", "minLength": 1 } },
+                "agent_endpoints": { "type": "object", "description": "operation → SoRLa agent endpoint id from catalog.agent_endpoints", "additionalProperties": { "type": "string", "minLength": 1 } }
+            }
+        })
     }
 
     fn analyse_sorla(
@@ -698,6 +821,366 @@ fn check_named_or_candidates(
     }
 }
 
+pub struct BusinessEventsExtension;
+
+impl OperaLaExtension for BusinessEventsExtension {
+    fn id(&self) -> &'static str {
+        EXTENSION_BUSINESS_EVENTS
+    }
+
+    fn capability(&self) -> &'static str {
+        "business_events"
+    }
+
+    fn version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    fn qa_schema(&self) -> Value {
+        json!({
+            "schema": "greentic.qa.schema.v1",
+            "flow": "operala.business_events",
+            "sections": [
+                {
+                    "id": "business_events.catalog",
+                    "title": "Event catalog",
+                    "questions": [
+                        {"id": "name", "kind": "text", "required": true},
+                        {"id": "events", "kind": "list", "required": true}
+                    ]
+                },
+                {
+                    "id": "business_events.triggers",
+                    "title": "Triggers",
+                    "questions": [
+                        {"id": "triggers", "kind": "list", "required": false}
+                    ]
+                }
+            ]
+        })
+    }
+
+    fn answers_schema(&self) -> Value {
+        let time_of_day = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hour", "minute"],
+            "properties": {
+                "hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+                "minute": { "type": "integer", "minimum": 0, "maximum": 59 }
+            }
+        });
+        // Tagged union on `kind`, matching `greentic_triggers::TriggerSchedule`'s
+        // serde shape (the schema the LLM must emit).
+        let schedule_schema = json!({
+            "type": "object",
+            "description": "A recurrence schedule, a one-shot, or a raw cron escape hatch.",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": { "kind": { "const": "every_minute" } }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "minute"],
+                    "properties": {
+                        "kind": { "const": "hourly" },
+                        "minute": { "type": "integer", "minimum": 0, "maximum": 59 }
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "at"],
+                    "properties": {
+                        "kind": { "const": "daily" },
+                        "at": time_of_day.clone()
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "day", "at"],
+                    "properties": {
+                        "kind": { "const": "weekly" },
+                        "day": { "enum": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] },
+                        "at": time_of_day.clone()
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "day", "at"],
+                    "properties": {
+                        "kind": { "const": "monthly" },
+                        "day": { "type": "integer", "minimum": 1, "maximum": 31 },
+                        "at": time_of_day.clone()
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "month", "day", "at"],
+                    "properties": {
+                        "kind": { "const": "yearly" },
+                        "month": { "type": "integer", "minimum": 1, "maximum": 12 },
+                        "day": { "type": "integer", "minimum": 1, "maximum": 31 },
+                        "at": time_of_day.clone()
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "datetime"],
+                    "properties": {
+                        "kind": { "const": "once_at" },
+                        "datetime": { "type": "string", "format": "date-time" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "expr"],
+                    "properties": {
+                        "kind": { "const": "cron" },
+                        "expr": { "type": "string", "minLength": 1 }
+                    }
+                }
+            ]
+        });
+
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "events", "triggers"],
+            "properties": {
+                "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "events": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["domain", "name", "schema_version"],
+                        "properties": {
+                            "domain": { "type": "string", "minLength": 1 },
+                            "name": { "type": "string", "minLength": 1 },
+                            "schema_version": { "type": "string", "minLength": 1 },
+                            "payload_fields": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } }
+                        }
+                    }
+                },
+                "triggers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["id", "schedule", "emits"],
+                        "properties": {
+                            "id": { "type": "string", "minLength": 1 },
+                            "schedule": schedule_schema,
+                            "emits": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "A declared event reference: `domain.name` or `cap://greentic/events/{domain}/{name}`."
+                            },
+                            "payload_template": {}
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn analyse_sorla(
+        &self,
+        _sorla: &SorlaContract,
+        answers: &OperalaAnswers,
+    ) -> OperalaResult<ReadinessReport> {
+        let be = answers
+            .capability_answers
+            .business_events
+            .as_ref()
+            .ok_or_else(|| "missing capability_answers.business_events".to_string())?;
+
+        let mut found = BTreeMap::new();
+        let mut missing = Vec::new();
+        let mut warnings = Vec::new();
+
+        let declared_events: Vec<String> = be
+            .events
+            .iter()
+            .map(|event| format!("{}.{}", event.domain, event.name))
+            .collect();
+
+        if be.events.is_empty() {
+            warnings.push("no events declared; triggers cannot emit anything".to_string());
+        }
+        if be.triggers.is_empty() {
+            warnings.push(
+                "no triggers declared; the event catalog will never be produced automatically"
+                    .to_string(),
+            );
+        }
+
+        for trigger in &be.triggers {
+            let def = greentic_triggers::TriggerDef {
+                id: trigger.id.clone(),
+                schedule: trigger.schedule.clone(),
+                emits: trigger.emits.clone(),
+                payload_template: trigger.payload_template.clone(),
+            };
+            if let Err(errors) = greentic_triggers::validate_trigger(&def) {
+                for error in errors {
+                    missing.push(format!("trigger `{}`: {error}", trigger.id));
+                }
+            }
+
+            match resolve_business_event_ref(&trigger.emits) {
+                Some(key) if declared_events.contains(&key) => {
+                    found.insert(format!("trigger.{}.emits", trigger.id), Value::String(key));
+                }
+                Some(key) => {
+                    missing.push(format!(
+                        "trigger `{}` emits `{key}`, which is not declared in events",
+                        trigger.id
+                    ));
+                }
+                None => {
+                    missing.push(format!(
+                        "trigger `{}` has an unparseable `emits` reference `{}`",
+                        trigger.id, trigger.emits
+                    ));
+                }
+            }
+        }
+
+        let status = if missing.is_empty() {
+            ReadinessStatus::Ready
+        } else {
+            ReadinessStatus::NeedsSorlaChanges
+        };
+        let summary = match status {
+            ReadinessStatus::Ready => {
+                "Business events handoff can be generated: every trigger emits a declared event"
+                    .to_string()
+            }
+            ReadinessStatus::NeedsSorlaChanges => {
+                "Business events needs fixes: some triggers reference undeclared events or invalid schedules"
+                    .to_string()
+            }
+            ReadinessStatus::UnsafeOrAmbiguous => {
+                "Business events has ambiguous event bindings".to_string()
+            }
+        };
+
+        Ok(ReadinessReport {
+            schema: READINESS_SCHEMA.to_string(),
+            capability: "business_events".to_string(),
+            status,
+            found,
+            missing,
+            warnings,
+            summary,
+        })
+    }
+
+    fn build_handoff(
+        &self,
+        sorla: &SorlaContract,
+        answers: &OperalaAnswers,
+        readiness: &ReadinessReport,
+    ) -> OperalaResult<OperaLaHandoff> {
+        let be = answers
+            .capability_answers
+            .business_events
+            .as_ref()
+            .ok_or_else(|| "missing capability_answers.business_events".to_string())?;
+
+        let mut schemas = BTreeMap::new();
+        for event in &be.events {
+            schemas.insert(
+                format!("{}-{}", event.domain, event.name),
+                business_event_payload_schema(event),
+            );
+        }
+
+        Ok(OperaLaHandoff {
+            schema: HANDOFF_SCHEMA.to_string(),
+            capability: "business_events".to_string(),
+            extension: self.id().to_string(),
+            extension_version: self.version().to_string(),
+            tenant_required: true,
+            team_optional: true,
+            sorla: HandoffSorla {
+                source: sorla.source.clone(),
+                source_digest: sorla.source_digest.clone(),
+                parser: "greentic-sorla-lib".to_string(),
+                required_schema: "greentic.sorla.v0.2".to_string(),
+                package_name: sorla.package_name.clone(),
+                package_version: sorla.package_version.clone(),
+            },
+            sorx: SorxBindingTemplate {
+                transport: "http".to_string(),
+                url: "runtime-provided".to_string(),
+            },
+            bindings: json!({
+                "name": be.name,
+                "events": be.events,
+                "triggers": be.triggers,
+                "source_digest": sorla.source_digest,
+            }),
+            input_modes: vec!["event".to_string()],
+            schemas,
+            flows: vec!["business-event-trigger.flow.yaml".to_string()],
+            ui: Vec::new(),
+            tests: vec!["business-events.sample.json".to_string()],
+            readiness: readiness.clone(),
+        })
+    }
+}
+
+/// Resolve a trigger's `emits` field to a normalized `domain.name` key.
+/// Accepts either the dotted form (`domain.name`) or the capability-URI form
+/// (`cap://greentic/events/{domain}/{name}`). Returns `None` when neither shape matches.
+fn resolve_business_event_ref(emits: &str) -> Option<String> {
+    if let Some(rest) = emits.strip_prefix("cap://greentic/events/") {
+        let (domain, name) = rest.split_once('/')?;
+        if domain.is_empty() || name.is_empty() {
+            return None;
+        }
+        return Some(format!("{domain}.{name}"));
+    }
+    let (domain, name) = emits.split_once('.')?;
+    if domain.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some(format!("{domain}.{name}"))
+}
+
+fn business_event_payload_schema(event: &EventDecl) -> Value {
+    let properties = event
+        .payload_fields
+        .iter()
+        .map(|(field, description)| (field.clone(), json!({ "description": description })))
+        .collect::<serde_json::Map<_, _>>();
+    let required = event.payload_fields.keys().cloned().collect::<Vec<_>>();
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": format!(
+            "https://greentic.ai/schemas/operala.business-events.{}.{}.v{}.json",
+            event.domain, event.name, event.schema_version
+        ),
+        "type": "object",
+        "required": required,
+        "properties": properties
+    })
+}
+
+#[cfg(feature = "cli")]
 pub fn run_operala_cli() -> std::process::ExitCode {
     let args = env::args_os().collect::<Vec<_>>();
     if let Some(help) = localized_operala_help_for_args(&args) {
@@ -713,10 +1196,56 @@ pub fn run_operala_cli() -> std::process::ExitCode {
     }
 }
 
+#[cfg(feature = "cli")]
 pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
     match cli.command {
         OperalaCommand::Prompt(args) => {
-            let answers = prompt_answers(&args)?;
+            let resolved = inference::resolve_llm_request_from_process_env(&args)?;
+            let llm_runtime = match &resolved {
+                Some(resolved) => Some(inference::LlmRuntime::build(resolved)?),
+                None => {
+                    if !args.no_llm {
+                        eprintln!(
+                            "greentic-operala: note: no LLM configured; using the deterministic keyword path (set GREENTIC_LLM_PROVIDER/GREENTIC_LLM_MODEL or pass --llm-provider/--llm-model to enable LLM inference)"
+                        );
+                    }
+                    None
+                }
+            };
+            let llm_ref = llm_runtime
+                .as_ref()
+                .map(|runtime| runtime as &dyn inference::ChatFn);
+            if let Some(existing_path) = &args.existing {
+                let Some(chat) = llm_ref else {
+                    return Err(
+                        "--existing (update mode) requires an LLM; pass --llm-provider/--llm-model or set GREENTIC_LLM_PROVIDER/GREENTIC_LLM_MODEL"
+                            .to_string(),
+                    );
+                };
+                let raw = fs::read_to_string(existing_path)
+                    .map_err(|err| format!("failed to read {}: {err}", existing_path.display()))?;
+                let existing: OperalaAnswers = serde_json::from_str(&raw).map_err(to_string)?;
+                let sorla = load_sorla_contract(&SourceRef {
+                    kind: SourceKind::File,
+                    uri: args.sorla.clone(),
+                    digest: None,
+                })?;
+                let outcome = inference::update_answers(chat, &existing, &sorla, &args.prompt)?;
+                let output = match (&args.output, args.in_place) {
+                    (Some(output), _) => output.clone(),
+                    (None, true) => existing_path.clone(),
+                    (None, false) => existing_path.with_file_name("answers.updated.json"),
+                };
+                write_json_file(&output, &outcome.answers)?;
+                if outcome.diff.is_empty() {
+                    println!("no changes");
+                } else {
+                    println!("{}", inference::diff::format_diff(&outcome.diff));
+                }
+                println!("updated answers written to {}", output.display());
+                return Ok(());
+            }
+            let answers = prompt_answers_with_llm(&args, llm_ref)?;
             let output = args
                 .output
                 .clone()
@@ -752,48 +1281,108 @@ pub fn run_operala(cli: OperalaCli) -> OperalaResult<()> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn prompt_answers(args: &PromptArgs) -> OperalaResult<OperalaAnswers> {
+    prompt_answers_with_llm(args, None)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn prompt_answers_with_llm(
+    args: &PromptArgs,
+    llm: Option<&dyn inference::ChatFn>,
+) -> OperalaResult<OperalaAnswers> {
     let sorla = load_sorla_contract(&SourceRef {
         kind: SourceKind::File,
         uri: args.sorla.clone(),
         digest: None,
     })?;
-    let lower_prompt = args.prompt.to_ascii_lowercase();
-    let capability = if lower_prompt.contains("bulk ingest")
-        || lower_prompt.contains("bulk upload")
-        || lower_prompt.contains("batch upload")
-        || lower_prompt.contains("upload operation")
-    {
-        "bulk_ingest"
-    } else if lower_prompt.contains("reconcil")
-        || lower_prompt.contains("bank transaction")
-        || lower_prompt.contains("rent payment")
-        || lower_prompt.contains("invoice payment")
-    {
-        "reconciliation"
-    } else {
-        return Err(follow_up_required(
-            "Which operational capability should OperaLa author for this SoRLa contract?",
-        ));
-    };
+    let capability = detect_capability(&args.prompt, llm)?;
 
-    let (extension, reconciliation, bulk_ingest, output_name) = if capability == "bulk_ingest" {
-        let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
-        (
-            EXTENSION_BULK_INGEST.to_string(),
-            None,
-            Some(bulk.clone()),
-            bulk.name.clone(),
-        )
-    } else {
-        let reconciliation = infer_reconciliation_answers(&sorla)?;
-        (
-            EXTENSION_RECONCILIATION.to_string(),
-            Some(reconciliation.clone()),
-            None,
-            reconciliation.name.clone(),
-        )
-    };
+    let (extension, reconciliation, bulk_ingest, business_events, output_name) =
+        match (capability, llm) {
+            ("reconciliation", Some(chat)) => {
+                let value = inference::infer_capability_answers(
+                    chat,
+                    EXTENSION_RECONCILIATION,
+                    &RECONCILIATION_EXTENSION.answers_schema(),
+                    &sorla,
+                    &args.prompt,
+                    None,
+                )?;
+                let reconciliation: ReconciliationAnswers =
+                    serde_json::from_value(value).map_err(to_string)?;
+                (
+                    EXTENSION_RECONCILIATION.to_string(),
+                    Some(reconciliation.clone()),
+                    None,
+                    None,
+                    reconciliation.name.clone(),
+                )
+            }
+            ("bulk_ingest", Some(chat)) => {
+                let value = inference::infer_capability_answers(
+                    chat,
+                    EXTENSION_BULK_INGEST,
+                    &BULK_INGEST_EXTENSION.answers_schema(),
+                    &sorla,
+                    &args.prompt,
+                    None,
+                )?;
+                let bulk: BulkIngestAnswers = serde_json::from_value(value).map_err(to_string)?;
+                (
+                    EXTENSION_BULK_INGEST.to_string(),
+                    None,
+                    Some(bulk.clone()),
+                    None,
+                    bulk.name.clone(),
+                )
+            }
+            ("business_events", Some(chat)) => {
+                let value = inference::infer_capability_answers(
+                    chat,
+                    EXTENSION_BUSINESS_EVENTS,
+                    &BUSINESS_EVENTS_EXTENSION.answers_schema(),
+                    &sorla,
+                    &args.prompt,
+                    None,
+                )?;
+                let business_events: BusinessEventsAnswers =
+                    serde_json::from_value(value).map_err(to_string)?;
+                (
+                    EXTENSION_BUSINESS_EVENTS.to_string(),
+                    None,
+                    None,
+                    Some(business_events.clone()),
+                    business_events.name.clone(),
+                )
+            }
+            ("bulk_ingest", None) => {
+                let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
+                (
+                    EXTENSION_BULK_INGEST.to_string(),
+                    None,
+                    Some(bulk.clone()),
+                    None,
+                    bulk.name.clone(),
+                )
+            }
+            ("reconciliation", None) => {
+                let reconciliation = infer_reconciliation_answers(&sorla)?;
+                (
+                    EXTENSION_RECONCILIATION.to_string(),
+                    Some(reconciliation.clone()),
+                    None,
+                    None,
+                    reconciliation.name.clone(),
+                )
+            }
+            (other, None) => {
+                return Err(format!("unsupported capability '{other}'"));
+            }
+            (other, Some(_)) => {
+                return Err(format!("unsupported capability '{other}'"));
+            }
+        };
     let work_dir = PathBuf::from(format!("target/operala/{output_name}"));
     let gtpack_file_name = format!("{}.gtpack", output_name.replace('_', "-"));
     Ok(OperalaAnswers {
@@ -824,11 +1413,63 @@ pub fn prompt_answers(args: &PromptArgs) -> OperalaResult<OperalaAnswers> {
         capability_answers: CapabilityAnswers {
             reconciliation,
             bulk_ingest,
+            business_events,
         },
         assumptions: Vec::new(),
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn detect_capability(
+    prompt: &str,
+    llm: Option<&dyn inference::ChatFn>,
+) -> OperalaResult<&'static str> {
+    let lower_prompt = prompt.to_ascii_lowercase();
+    if lower_prompt.contains("bulk ingest")
+        || lower_prompt.contains("bulk upload")
+        || lower_prompt.contains("batch upload")
+        || lower_prompt.contains("upload operation")
+    {
+        return Ok("bulk_ingest");
+    }
+    if lower_prompt.contains("reconcil")
+        || lower_prompt.contains("bank transaction")
+        || lower_prompt.contains("rent payment")
+        || lower_prompt.contains("invoice payment")
+    {
+        return Ok("reconciliation");
+    }
+    if lower_prompt.contains("trigger")
+        || lower_prompt.contains("emit ")
+        || lower_prompt.contains("business event")
+        || lower_prompt.contains("every morning")
+        || lower_prompt.contains("every day")
+        || lower_prompt.contains("every hour")
+        || lower_prompt.contains("every week")
+        || lower_prompt.contains("reminder")
+    {
+        return Ok("business_events");
+    }
+    if let Some(chat) = llm
+        && let Some(capability) = inference::classify_capability(chat, prompt)?
+    {
+        return Ok(match capability.as_str() {
+            "reconciliation" => "reconciliation",
+            "bulk_ingest" => "bulk_ingest",
+            "business_events" => "business_events",
+            _ => {
+                return Err(follow_up_required(&format!(
+                    "the LLM classified this as '{capability}', which OperaLa does not author; which operational capability should it use for this SoRLa contract?"
+                )));
+            }
+        });
+    }
+    Err(follow_up_required(
+        "Which operational capability should OperaLa author for this SoRLa contract?",
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn wizard_schema(locale: Option<&str>) -> Value {
     let locale = normalized_locale(locale);
     let registry = ExtensionRegistry::built_in();
@@ -859,6 +1500,7 @@ pub fn wizard_schema(locale: Option<&str>) -> Value {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_answers(reference: &str) -> OperalaResult<OperalaAnswers> {
     let path = resolve_local_path(reference, None, None)?;
     let bytes = fs::read(&path)
@@ -867,6 +1509,7 @@ pub fn load_answers(reference: &str) -> OperalaResult<OperalaAnswers> {
         .map_err(|err| format!("failed to parse answers {}: {err}", path.display()))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
     let state_path = answers.outputs.work_dir.join("operala.state.json");
     let resumed = state_path.exists();
@@ -973,10 +1616,10 @@ pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
         .clone()
         .unwrap_or_else(|| work_dir_gtpack_path.clone());
     if primary_gtpack_path == work_dir_gtpack_path {
-        write_operala_gtpack(&primary_gtpack_path, &handoff)?;
+        write_operala_gtpack(&primary_gtpack_path, &handoff, answers)?;
     } else {
-        write_operala_gtpack(&primary_gtpack_path, &handoff)?;
-        write_operala_gtpack(&work_dir_gtpack_path, &handoff)?;
+        write_operala_gtpack(&primary_gtpack_path, &handoff, answers)?;
+        write_operala_gtpack(&work_dir_gtpack_path, &handoff, answers)?;
     }
     write_wizard_state(
         &state_path,
@@ -1187,37 +1830,53 @@ fn require_map_keys(
     Ok(())
 }
 
+/// Parse a SoRLa contract from a raw YAML string — no filesystem access.
+/// Available on both native and wasm32 targets.
+pub fn parse_sorla_contract_from_yaml(raw_yaml: &str) -> OperalaResult<SorlaContract> {
+    let actual_digest = format!("sha256:{}", sha256_hex(raw_yaml.as_bytes()));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(raw_yaml)
+        .map_err(|err| format!("failed to parse SoRLa YAML: {err}"))?;
+    let package = yaml
+        .get("package")
+        .and_then(serde_yaml::Value::as_mapping)
+        .ok_or_else(|| "SoRLa source must contain package".to_string())?;
+    Ok(SorlaContract {
+        source: SourceRef {
+            kind: SourceKind::File,
+            // The in-memory parse path has no URI; `load_sorla_contract`
+            // re-applies the real file URI after delegating here.
+            uri: String::new(),
+            digest: Some(actual_digest.clone()),
+        },
+        source_digest: actual_digest,
+        package_name: yaml_string(package, "name").unwrap_or_else(|| "unknown".to_string()),
+        package_version: yaml_string(package, "version").unwrap_or_else(|| "0.1.0".to_string()),
+        records: yaml_named_list(&yaml, "records"),
+        events: yaml_named_list(&yaml, "events"),
+        actions: yaml_named_list(&yaml, "actions"),
+        agent_endpoints: yaml_id_list(&yaml, "agent_endpoints"),
+        raw_yaml: raw_yaml.to_string(),
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_sorla_contract(source: &SourceRef) -> OperalaResult<SorlaContract> {
     let path = resolve_local_path(&source.uri, None, None)?;
     let raw_yaml = fs::read_to_string(&path)
         .map_err(|err| format!("failed to read SoRLa source {}: {err}", path.display()))?;
     let actual_digest = format!("sha256:{}", sha256_hex(raw_yaml.as_bytes()));
     verify_reference_digest(&source.uri, source.digest.as_deref(), &actual_digest)?;
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&raw_yaml)
-        .map_err(|err| format!("failed to parse SoRLa YAML {}: {err}", path.display()))?;
-    let package = yaml
-        .get("package")
-        .and_then(serde_yaml::Value::as_mapping)
-        .ok_or_else(|| "SoRLa source must contain package".to_string())?;
-    let package_name = yaml_string(package, "name").unwrap_or_else(|| "unknown".to_string());
-    let package_version = yaml_string(package, "version").unwrap_or_else(|| "0.1.0".to_string());
-    Ok(SorlaContract {
-        source: SourceRef {
-            kind: source.kind.clone(),
-            uri: source.uri.clone(),
-            digest: Some(actual_digest.clone()),
-        },
-        source_digest: actual_digest,
-        package_name,
-        package_version,
-        records: yaml_named_list(&yaml, "records"),
-        events: yaml_named_list(&yaml, "events"),
-        actions: yaml_named_list(&yaml, "actions"),
-        agent_endpoints: yaml_id_list(&yaml, "agent_endpoints"),
-        raw_yaml,
-    })
+    let mut contract = parse_sorla_contract_from_yaml(&raw_yaml)?;
+    // Re-apply the full source reference (uri + kind) from the caller.
+    contract.source = SourceRef {
+        kind: source.kind.clone(),
+        uri: source.uri.clone(),
+        digest: Some(actual_digest),
+    };
+    Ok(contract)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn infer_reconciliation_answers(sorla: &SorlaContract) -> OperalaResult<ReconciliationAnswers> {
     let source_event =
         pick(&sorla.events, &["BankTransaction", "PaymentWebhook"]).ok_or_else(|| {
@@ -1300,6 +1959,7 @@ fn follow_up_required(question: &str) -> String {
     format!("follow-up required: {question}")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn sorla_patch_proposal(
     readiness: &ReadinessReport,
     sorla: &SorlaContract,
@@ -1349,6 +2009,7 @@ fn sorla_patch_proposal(
     Ok(proposal)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn add_payment_record_operation(record_name: &str) -> Value {
     let patch_name = patch_record_name(record_name);
     json!({
@@ -1368,6 +2029,7 @@ fn add_payment_record_operation(record_name: &str) -> Value {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn add_reconciliation_case_record_operation(record_name: &str) -> Value {
     let patch_name = patch_record_name(record_name);
     json!({
@@ -1387,6 +2049,7 @@ fn add_reconciliation_case_record_operation(record_name: &str) -> Value {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn validate_sorla_patch_proposal(proposal: &Value) -> OperalaResult<()> {
     if proposal["schema"] != "greentic.sorla.patch.v1" {
         return Err("SoRLa patch proposal has unsupported schema".to_string());
@@ -1450,12 +2113,14 @@ fn validate_sorla_patch_proposal(proposal: &Value) -> OperalaResult<()> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn missing_concept_name(message: &str) -> Option<&str> {
     let (_, rest) = message.split_once('`')?;
     let (name, _) = rest.split_once('`')?;
     Some(name)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn patch_record_name(name: &str) -> String {
     let mut out = String::new();
     let mut previous_was_separator = true;
@@ -1483,6 +2148,7 @@ fn patch_record_name(name: &str) -> String {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_sorla_patch_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -1492,6 +2158,7 @@ fn is_sorla_patch_identifier(value: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_lock(
     answers: &OperalaAnswers,
     sorla: &SorlaContract,
@@ -1510,6 +2177,7 @@ fn build_lock(
     }))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_summary(readiness: &ReadinessReport, handoff: &OperaLaHandoff) -> String {
     let locale = None;
     let unresolved = if readiness.missing.is_empty() {
@@ -1542,6 +2210,7 @@ fn build_summary(readiness: &ReadinessReport, handoff: &OperaLaHandoff) -> Strin
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn capability_output_name(answers: &OperalaAnswers, handoff: &OperaLaHandoff) -> String {
     answers
         .capability_answers
@@ -1558,6 +2227,7 @@ fn capability_output_name(answers: &OperalaAnswers, handoff: &OperaLaHandoff) ->
         .unwrap_or_else(|| handoff.capability.clone())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_wizard_state(
     path: &Path,
     status: &str,
@@ -1588,6 +2258,7 @@ fn write_wizard_state(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_handoff_assets(work_dir: &Path, handoff: &OperaLaHandoff) -> OperalaResult<()> {
     write_yaml_file(work_dir.join("operala.yaml"), handoff)?;
     write_json_file(
@@ -1651,23 +2322,19 @@ fn write_handoff_assets(work_dir: &Path, handoff: &OperaLaHandoff) -> OperalaRes
     Ok(())
 }
 
-fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<()> {
-    if path.is_file() {
-        fs::remove_file(path)
-            .map_err(|err| format!("failed to replace pack file {}: {err}", path.display()))?;
-    } else if path.is_dir() {
-        fs::remove_dir_all(path).map_err(|err| {
-            format!(
-                "failed to replace pack directory {} with archive: {err}",
-                path.display()
-            )
-        })?;
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
-    }
-
+/// Assemble a [`PackBuilder`] from the given handoff — no filesystem I/O.
+/// Available on all targets (native and wasm32).
+///
+/// `answers` is optional: when present and `handoff.capability == "business_events"`,
+/// the declared triggers/events are additionally chained onto the manifest as inline
+/// `greentic.triggers.v1` / `greentic.business-events.v1` extensions (the shape the
+/// greentic-start scheduler and business-events runtime read). Callers that only have
+/// a handoff (no answers in scope) may pass `None`; the pack still builds, just without
+/// those two inline extensions.
+fn build_operala_pack_builder(
+    handoff: &OperaLaHandoff,
+    answers: Option<&OperalaAnswers>,
+) -> OperalaResult<PackBuilder> {
     let pack_name = format!(
         "{}-{}",
         handoff.sorla.package_name,
@@ -1780,6 +2447,82 @@ fn write_operala_gtpack(path: &Path, handoff: &OperaLaHandoff) -> OperalaResult<
             serde_json::to_vec_pretty(schema).map_err(to_string)?,
         );
     }
+
+    if handoff.capability == "business_events"
+        && let Some(be) = answers.and_then(|a| a.capability_answers.business_events.as_ref())
+    {
+        let triggers_payload = json!({
+            "triggers": be.triggers.iter().map(|t| json!({
+                "id": t.id,
+                "schedule": t.schedule,
+                "emits": t.emits,
+                "payload_template": t.payload_template,
+            })).collect::<Vec<_>>()
+        });
+        let events_payload = json!({
+            "events": be.events.iter().map(|e| json!({
+                "domain": e.domain,
+                "name": e.name,
+                "schema_version": e.schema_version,
+                "payload_fields": e.payload_fields,
+            })).collect::<Vec<_>>()
+        });
+        builder = builder
+            .with_inline_extension(
+                "greentic.triggers.v1",
+                "greentic.triggers.v1",
+                BUSINESS_EVENTS_EXTENSION.version(),
+                triggers_payload,
+            )
+            .with_inline_extension(
+                "greentic.business-events.v1",
+                "greentic.business-events.v1",
+                BUSINESS_EVENTS_EXTENSION.version(),
+                events_payload,
+            );
+    }
+
+    Ok(builder)
+}
+
+/// Returns the in-memory file set (archive path → bytes) that would be written into a `.gtpack`.
+/// Includes `manifest.cbor`, `manifest.json`, `provenance.json`, `sbom.json`, and all assets.
+/// No filesystem I/O — available on all targets (native and wasm32).
+///
+/// NOTE: does not receive `answers`, so `business_events` packs built via this entrypoint
+/// (e.g. the wasm designer-extension path) do not get the inline `greentic.triggers.v1` /
+/// `greentic.business-events.v1` extensions — only [`write_operala_gtpack`] (native, driven
+/// by `run_wizard`) does. See `build_operala_pack_builder`'s `answers` parameter.
+pub fn build_operala_pack_entries(
+    handoff: &OperaLaHandoff,
+) -> OperalaResult<Vec<(String, Vec<u8>)>> {
+    let builder = build_operala_pack_builder(handoff, None)?;
+    let map = builder.entries().map_err(to_string)?;
+    Ok(map.into_iter().collect())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_operala_gtpack(
+    path: &Path,
+    handoff: &OperaLaHandoff,
+    answers: &OperalaAnswers,
+) -> OperalaResult<()> {
+    if path.is_file() {
+        fs::remove_file(path)
+            .map_err(|err| format!("failed to replace pack file {}: {err}", path.display()))?;
+    } else if path.is_dir() {
+        fs::remove_dir_all(path).map_err(|err| {
+            format!(
+                "failed to replace pack directory {} with archive: {err}",
+                path.display()
+            )
+        })?;
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    let builder = build_operala_pack_builder(handoff, Some(answers))?;
     builder.build(path).map_err(to_string)?;
     Ok(())
 }
@@ -1865,6 +2608,7 @@ fn yaml_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn pick(candidates: &[String], preferred: &[&str]) -> Option<String> {
     preferred
         .iter()
@@ -1905,6 +2649,7 @@ fn default_true() -> bool {
     true
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_local_path(
     reference: &str,
     tenant: Option<&str>,
@@ -1919,6 +2664,7 @@ fn resolve_local_path(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_json_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaResult<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -1929,6 +2675,7 @@ fn write_json_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaR
     fs::write(path, bytes).map_err(|err| format!("failed to write {}: {err}", path.display()))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_yaml_file<T: Serialize, P: AsRef<Path>>(path: P, value: &T) -> OperalaResult<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -1950,6 +2697,7 @@ fn to_string<E: std::fmt::Display>(err: E) -> String {
     err.to_string()
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn has_help(args: &[OsString]) -> bool {
     args.iter().skip(1).any(|arg| {
         let arg = arg.to_string_lossy();
@@ -1957,6 +2705,7 @@ fn has_help(args: &[OsString]) -> bool {
     })
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn explicit_locale_arg(args: &[OsString]) -> Option<String> {
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -1971,6 +2720,7 @@ fn explicit_locale_arg(args: &[OsString]) -> Option<String> {
     None
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn locale_from_args(args: &[OsString]) -> Option<String> {
     explicit_locale_arg(args)
         .or_else(|| env::var("OPERALA_LOCALE").ok())
@@ -2032,6 +2782,7 @@ fn text_direction(locale: &str) -> &'static str {
     }
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperalaHelpCommand {
     Root,
@@ -2039,6 +2790,7 @@ enum OperalaHelpCommand {
     Wizard,
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_help_for_args(args: &[OsString]) -> Option<String> {
     if !has_help(args) {
         return None;
@@ -2051,6 +2803,7 @@ fn localized_operala_help_for_args(args: &[OsString]) -> Option<String> {
     })
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn operala_help_command(args: &[OsString]) -> OperalaHelpCommand {
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -2070,6 +2823,7 @@ fn operala_help_command(args: &[OsString]) -> OperalaHelpCommand {
     OperalaHelpCommand::Root
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala <COMMAND>\n\n{commands}:\n  prompt    {prompt}\n  wizard    {wizard}\n\n{options}:\n      --locale <LOCALE>  {locale_option}\n  -h, --help             {help_option}\n",
@@ -2084,6 +2838,7 @@ fn localized_operala_help(locale: Option<&str>) -> String {
     )
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_prompt_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala prompt --sorla <FILE> [OPTIONS] <PROMPT>\n\n{options}:\n      --sorla <FILE>     {sorla_option}\n      --locale <LOCALE>  {locale_option}\n      --output <FILE>    {output_option}\n      --tenant <TENANT>  {tenant_option}\n      --team <TEAM>      {team_option}\n  -h, --help             {help_option}\n",
@@ -2099,6 +2854,7 @@ fn localized_operala_prompt_help(locale: Option<&str>) -> String {
     )
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_wizard_help(locale: Option<&str>) -> String {
     format!(
         "{about}\n\n{usage}: greentic-operala wizard [OPTIONS]\n\n{options}:\n      --schema           {schema_option}\n      --answers <REF>    {answers_option}\n      --locale <LOCALE>  {locale_option}\n  -h, --help             {help_option}\n",
@@ -2112,6 +2868,7 @@ fn localized_operala_wizard_help(locale: Option<&str>) -> String {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn distributed_cache_file_name(reference: &str) -> String {
     let escaped = reference
         .chars()
@@ -2126,17 +2883,38 @@ fn distributed_cache_file_name(reference: &str) -> String {
     format!("{escaped}.json")
 }
 
+// Native + cli feature: validates the greentic_qa_lib linkage and returns its name.
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn greentic_qa_engine() -> &'static str {
     let _ = std::any::type_name::<greentic_qa_lib::WizardRunConfig>();
     "greentic-qa-lib"
 }
 
+// Native without cli feature (e.g. when consumed as a library dependency):
+// greentic_qa_lib is not linked; return the static label directly.
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "cli")))]
+fn greentic_qa_engine() -> &'static str {
+    "greentic-qa-lib"
+}
+
+// Wasm: greentic-qa-lib is CLI-only and not available on wasm32; return a
+// static label so wasm-safe callers can still use this as a const string.
+// (wizard_schema itself is also gated native-only for T5; this stub is kept
+// for future wasm-safe schema serialisation if needed.)
+#[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
+fn greentic_qa_engine() -> &'static str {
+    "greentic-qa-lib"
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn is_distributed_reference(reference: &str) -> bool {
     ["oci://", "store://", "repo://"]
         .iter()
         .any(|scheme| reference.starts_with(scheme))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn verify_reference_digest(
     reference: &str,
     declared_digest: Option<&str>,
@@ -2158,6 +2936,42 @@ fn verify_reference_digest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn business_events_answers_roundtrips() {
+        use greentic_triggers::{TimeOfDay, TriggerSchedule};
+        let a = BusinessEventsAnswers {
+            name: "rent".into(),
+            events: vec![EventDecl {
+                domain: "tenancy".into(),
+                name: "daily-rent-reminder".into(),
+                schema_version: "1".into(),
+                payload_fields: Default::default(),
+            }],
+            triggers: vec![TriggerDecl {
+                id: "daily_rent".into(),
+                schedule: TriggerSchedule::Daily {
+                    at: TimeOfDay { hour: 6, minute: 0 },
+                },
+                emits: "tenancy.daily-rent-reminder".into(),
+                payload_template: serde_json::json!({}),
+            }],
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["triggers"][0]["schedule"]["kind"], "daily");
+        let back: BusinessEventsAnswers = serde_json::from_value(v).unwrap();
+        assert_eq!(back.triggers[0].id, "daily_rent");
+    }
+
+    #[test]
+    fn parse_sorla_from_yaml_matches_file_load() {
+        let yaml = std::fs::read_to_string("extensions/reconciliation/examples/tenancy/sorla.yaml")
+            .unwrap();
+        let parsed = parse_sorla_contract_from_yaml(&yaml).expect("parse");
+        assert_eq!(parsed.raw_yaml, yaml);
+        assert!(!parsed.records.is_empty());
+        assert_eq!(parsed.source.kind, SourceKind::File);
+    }
 
     #[test]
     fn validates_fixture_answers() {
@@ -2360,6 +3174,11 @@ mod tests {
             team: Some("property-ops".to_string()),
             locale: Some("en-GB".to_string()),
             output: None,
+            llm_provider: None,
+            llm_model: None,
+            no_llm: false,
+            existing: None,
+            in_place: false,
             prompt: "Set up rent payment reconciliation from bank transactions".to_string(),
         })
         .expect("prompt produces answers");
@@ -2398,6 +3217,11 @@ mod tests {
             team: None,
             locale: None,
             output: None,
+            llm_provider: None,
+            llm_model: None,
+            no_llm: false,
+            existing: None,
+            in_place: false,
             prompt: "Help my operations team with something".to_string(),
         })
         .expect_err("unclear prompt should need follow-up");
@@ -2443,6 +3267,11 @@ mod tests {
             team: Some("finance".to_string()),
             locale: Some("en-GB".to_string()),
             output: None,
+            llm_provider: None,
+            llm_model: None,
+            no_llm: false,
+            existing: None,
+            in_place: false,
             prompt: "Create a generic bulk upload operation from a JSON batch file with exactly 3 tenants, 3 tenancies, and 6 payments.".to_string(),
         })
         .expect("bulk upload prompt produces answers");
@@ -2685,5 +3514,442 @@ mod tests {
         answers.locale = Some("nl-NL".to_string());
         let err = run_wizard(&answers).expect_err("unknown extension should fail");
         assert!(err.contains("Onbekende OperaLa-extensie"));
+    }
+
+    #[test]
+    fn prompt_args_parse_llm_flags() {
+        use clap::Parser;
+        let cli = OperalaCli::parse_from([
+            "greentic-operala",
+            "prompt",
+            "--sorla",
+            "s.yaml",
+            "--llm-provider",
+            "anthropic",
+            "--llm-model",
+            "claude-sonnet-4-6",
+            "--existing",
+            "old-answers.json",
+            "--in-place",
+            "update the tolerance",
+        ]);
+        let OperalaCommand::Prompt(args) = cli.command else {
+            panic!("expected prompt command");
+        };
+        assert_eq!(
+            args.llm_provider,
+            Some(greentic_llm::ProviderKind::Anthropic)
+        );
+        assert_eq!(args.llm_model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(
+            args.existing.as_deref(),
+            Some(std::path::Path::new("old-answers.json"))
+        );
+        assert!(args.in_place);
+        assert!(!args.no_llm);
+    }
+
+    #[test]
+    fn reconciliation_answers_schema_round_trips_the_fixture() {
+        let schema = RECONCILIATION_EXTENSION.answers_schema();
+        assert_eq!(schema["type"], "object");
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for field in [
+            "name",
+            "source_event",
+            "expected_record",
+            "settlement_record",
+            "exception_record",
+            "input_modes",
+            "source_fields",
+            "expected_fields",
+            "matching",
+            "exception_policy",
+            "actions",
+            "agent_endpoints",
+        ] {
+            assert!(required.contains(&field), "missing required field {field}");
+        }
+    }
+
+    #[test]
+    fn bulk_ingest_answers_schema_has_required_fields() {
+        let schema = BULK_INGEST_EXTENSION.answers_schema();
+        assert_eq!(schema["type"], "object");
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for field in [
+            "name",
+            "input_modes",
+            "record_collections",
+            "actions",
+            "validation",
+        ] {
+            assert!(required.contains(&field), "missing required field {field}");
+        }
+    }
+
+    #[test]
+    fn llm_backed_prompt_produces_validated_answers() {
+        let answers_value: serde_json::Value = {
+            let fixture: OperalaAnswers = serde_json::from_str(include_str!(
+                "../extensions/reconciliation/examples/tenancy/answers.json"
+            ))
+            .unwrap();
+            serde_json::to_value(fixture.capability_answers.reconciliation.unwrap()).unwrap()
+        };
+        let chat = inference::tests_support::scripted_chat(vec![inference::tests_support::emit(
+            answers_value,
+        )]);
+        let answers = prompt_answers_with_llm(
+            &PromptArgs {
+                sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+                locale: Some("en-GB".into()),
+                output: None,
+                tenant: Some("acme-property".into()),
+                team: None,
+                llm_provider: None,
+                llm_model: None,
+                no_llm: false,
+                existing: None,
+                in_place: false,
+                prompt: "Set up rent payment reconciliation from bank transactions".into(),
+            },
+            Some(&chat),
+        )
+        .expect("llm prompt produces answers");
+        assert_eq!(answers.extension, EXTENSION_RECONCILIATION);
+        let reconciliation = answers
+            .capability_answers
+            .reconciliation
+            .as_ref()
+            .expect("nested");
+        assert_eq!(reconciliation.source_event, "BankTransaction");
+        validate_answers(&answers).expect("llm answers validate");
+    }
+
+    #[test]
+    fn no_llm_path_is_byte_identical_to_legacy_keyword_path() {
+        let args = PromptArgs {
+            sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+            locale: Some("en-GB".into()),
+            output: None,
+            tenant: Some("acme-property".into()),
+            team: Some("property-ops".into()),
+            llm_provider: None,
+            llm_model: None,
+            no_llm: true,
+            existing: None,
+            in_place: false,
+            prompt: "Set up rent payment reconciliation from bank transactions".into(),
+        };
+        let via_wrapper = prompt_answers(&args).expect("wrapper works");
+        let via_llm_none = prompt_answers_with_llm(&args, None).expect("explicit none works");
+        assert_eq!(
+            serde_json::to_string(&via_wrapper).unwrap(),
+            serde_json::to_string(&via_llm_none).unwrap()
+        );
+    }
+
+    #[test]
+    fn update_mode_changes_only_the_instructed_field() {
+        let existing: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .unwrap();
+        let mut updated_value =
+            serde_json::to_value(existing.capability_answers.reconciliation.clone().unwrap())
+                .unwrap();
+        updated_value["matching"]["amount_tolerance"] = serde_json::json!(5.0);
+        let chat = inference::tests_support::scripted_chat(vec![inference::tests_support::emit(
+            updated_value,
+        )]);
+
+        let sorla = load_sorla_contract(&SourceRef {
+            kind: SourceKind::File,
+            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
+            digest: None,
+        })
+        .expect("fixture sorla loads");
+        let outcome =
+            inference::update_answers(&chat, &existing, &sorla, "raise the amount tolerance to 5")
+                .expect("update succeeds");
+
+        let updated_reconciliation = outcome
+            .answers
+            .capability_answers
+            .reconciliation
+            .as_ref()
+            .expect("nested");
+        assert_eq!(updated_reconciliation.matching.amount_tolerance, 5.0);
+        // Envelope preserved:
+        assert_eq!(outcome.answers.tenant, existing.tenant);
+        assert_eq!(outcome.answers.outputs.work_dir, existing.outputs.work_dir);
+        // Diff names the changed capability path (intent also changes — assert the capability change is present):
+        assert!(
+            outcome
+                .diff
+                .iter()
+                .any(|e| e.path == "capability_answers.reconciliation.matching.amount_tolerance"),
+            "diff: {:?}",
+            outcome.diff
+        );
+    }
+
+    #[test]
+    fn llm_classifier_fallback_routes_non_keyword_prompt() {
+        // Plain-content classification response (classifier reads message content).
+        fn classify(content: &str) -> greentic_llm::ChatResponse {
+            greentic_llm::ChatResponse {
+                content: content.into(),
+                tool_calls: vec![],
+                finish_reason: greentic_llm::FinishReason::Stop,
+            }
+        }
+        let recon_value: serde_json::Value = {
+            let fixture: OperalaAnswers = serde_json::from_str(include_str!(
+                "../extensions/reconciliation/examples/tenancy/answers.json"
+            ))
+            .unwrap();
+            serde_json::to_value(fixture.capability_answers.reconciliation.unwrap()).unwrap()
+        };
+        let chat = inference::tests_support::scripted_chat(vec![
+            classify(r#"{"capability": "reconciliation"}"#),
+            inference::tests_support::emit(recon_value),
+        ]);
+        let answers = prompt_answers_with_llm(
+            &PromptArgs {
+                sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+                locale: Some("en-GB".into()),
+                output: None,
+                tenant: Some("acme".into()),
+                team: None,
+                llm_provider: None,
+                llm_model: None,
+                no_llm: false,
+                existing: None,
+                in_place: false,
+                // deliberately keyword-free so the classifier branch runs:
+                prompt: "help me settle incoming money against what tenants owe".into(),
+            },
+            Some(&chat),
+        )
+        .expect("classifier-routed prompt produces answers");
+        assert_eq!(answers.extension, EXTENSION_RECONCILIATION);
+        assert_eq!(
+            answers.detected_capability.as_deref(),
+            Some("reconciliation")
+        );
+        validate_answers(&answers).expect("validates");
+    }
+
+    #[test]
+    fn llm_bulk_ingest_new_mode_produces_validated_answers() {
+        let bulk_value = serde_json::json!({
+            "name": "tenancy_bulk_ingest",
+            "input_modes": ["batch"],
+            "record_collections": { "payments": "Payment" },
+            "actions": { "create_payment": "create_payment" },
+            "validation": { "atomic": true, "dry_run": true, "require_unique_ids": true, "validate_references": true }
+        });
+        let chat = inference::tests_support::scripted_chat(vec![inference::tests_support::emit(
+            bulk_value,
+        )]);
+        let answers = prompt_answers_with_llm(
+            &PromptArgs {
+                sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+                locale: Some("en-GB".into()),
+                output: None,
+                tenant: Some("acme".into()),
+                team: None,
+                llm_provider: None,
+                llm_model: None,
+                no_llm: false,
+                existing: None,
+                in_place: false,
+                prompt: "bulk ingest historical records".into(),
+            },
+            Some(&chat),
+        )
+        .expect("bulk llm prompt produces answers");
+        assert_eq!(answers.extension, EXTENSION_BULK_INGEST);
+        let bulk = answers
+            .capability_answers
+            .bulk_ingest
+            .as_ref()
+            .expect("nested bulk");
+        assert!(!bulk.record_collections.is_empty());
+        validate_answers(&answers).expect("validates");
+    }
+
+    #[test]
+    fn pack_entries_include_manifest_and_handoff() {
+        let handoff = sample_handoff();
+        let entries = build_operala_pack_entries(&handoff).expect("entries");
+        let paths: Vec<&str> = entries.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            paths.contains(&"manifest.cbor"),
+            "missing manifest.cbor; got: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"assets/operala/operala-handoff.json"),
+            "missing assets/operala/operala-handoff.json; got: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"assets/operala/operala.yaml"),
+            "missing assets/operala/operala.yaml; got: {paths:?}"
+        );
+    }
+
+    fn sample_handoff() -> OperaLaHandoff {
+        let sorla = load_sorla_contract(&SourceRef {
+            kind: SourceKind::File,
+            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
+            digest: None,
+        })
+        .expect("fixture sorla loads");
+        let answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
+        let readiness = RECONCILIATION_EXTENSION
+            .analyse_sorla(&sorla, &answers)
+            .expect("readiness succeeds");
+        RECONCILIATION_EXTENSION
+            .build_handoff(&sorla, &answers, &readiness)
+            .expect("handoff builds")
+    }
+
+    #[test]
+    fn business_events_extension_registered_and_schema_tagged_union() {
+        let reg = ExtensionRegistry::built_in();
+        let ext = reg.get(EXTENSION_BUSINESS_EVENTS).expect("registered");
+        assert_eq!(ext.capability(), "business_events");
+        let s = serde_json::to_string(&ext.answers_schema()).unwrap();
+        assert!(
+            s.contains("\"kind\""),
+            "schedule schema must be a tagged union on kind"
+        );
+    }
+
+    fn sample_business_events_sorla() -> SorlaContract {
+        SorlaContract {
+            source: SourceRef {
+                kind: SourceKind::File,
+                uri: "business-events/examples/tenancy/sorla.yaml".to_string(),
+                digest: None,
+            },
+            source_digest: "sha256:business-events-test".to_string(),
+            package_name: "tenancy".to_string(),
+            package_version: "0.1.0".to_string(),
+            records: Vec::new(),
+            events: Vec::new(),
+            actions: Vec::new(),
+            agent_endpoints: Vec::new(),
+            raw_yaml: String::new(),
+        }
+    }
+
+    fn sample_business_events_answers() -> OperalaAnswers {
+        use greentic_triggers::TriggerSchedule;
+
+        OperalaAnswers {
+            schema: ANSWERS_SCHEMA.to_string(),
+            intent: "author business events".to_string(),
+            detected_capability: Some("business_events".to_string()),
+            extension: EXTENSION_BUSINESS_EVENTS.to_string(),
+            locale: Some("en-GB".to_string()),
+            tenant: Some("acme".to_string()),
+            team: None,
+            sorla: SorlaRef {
+                source: SourceRef {
+                    kind: SourceKind::File,
+                    uri: "business-events/examples/tenancy/sorla.yaml".to_string(),
+                    digest: None,
+                },
+                expected_schema: None,
+            },
+            outputs: OutputConfig {
+                handoff_path: None,
+                gtpack_path: None,
+                work_dir: std::env::temp_dir(),
+            },
+            approval: ApprovalConfig::default(),
+            capability_answers: CapabilityAnswers {
+                reconciliation: None,
+                bulk_ingest: None,
+                business_events: Some(BusinessEventsAnswers {
+                    name: "rent".to_string(),
+                    events: vec![EventDecl {
+                        domain: "tenancy".to_string(),
+                        name: "daily-rent-reminder".to_string(),
+                        schema_version: "1".to_string(),
+                        payload_fields: BTreeMap::new(),
+                    }],
+                    triggers: vec![TriggerDecl {
+                        id: "daily_rent".to_string(),
+                        schedule: TriggerSchedule::EveryMinute,
+                        emits: "tenancy.daily-rent-reminder".to_string(),
+                        payload_template: json!({}),
+                    }],
+                }),
+            },
+            assumptions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn business_events_handoff_writes_inline_triggers_and_events_into_manifest() {
+        use std::io::Read;
+
+        let sorla = sample_business_events_sorla();
+        let answers = sample_business_events_answers();
+        let readiness = BUSINESS_EVENTS_EXTENSION
+            .analyse_sorla(&sorla, &answers)
+            .expect("readiness succeeds");
+        assert_eq!(readiness.status, ReadinessStatus::Ready);
+        let handoff = BUSINESS_EVENTS_EXTENSION
+            .build_handoff(&sorla, &answers, &readiness)
+            .expect("handoff builds");
+
+        let pack_path = std::env::temp_dir().join(format!(
+            "operala-business-events-manifest-test-{}.gtpack",
+            std::process::id()
+        ));
+        write_operala_gtpack(&pack_path, &handoff, &answers).expect("pack writes");
+
+        let file = fs::File::open(&pack_path).expect("pack opens");
+        let mut archive = zip::ZipArchive::new(file).expect("pack is a zip archive");
+        let mut manifest_bytes = Vec::new();
+        {
+            let mut entry = archive
+                .by_name("manifest.cbor")
+                .expect("manifest.cbor present");
+            entry
+                .read_to_end(&mut manifest_bytes)
+                .expect("read manifest.cbor");
+        }
+        let manifest: Value =
+            serde_cbor::from_slice(&manifest_bytes).expect("manifest.cbor decodes");
+
+        assert_eq!(
+            manifest["extensions"]["greentic.triggers.v1"]["inline"]["triggers"][0]["id"],
+            "daily_rent"
+        );
+        assert_eq!(
+            manifest["extensions"]["greentic.business-events.v1"]["inline"]["events"][0]["domain"],
+            "tenancy"
+        );
+
+        let _ = fs::remove_file(&pack_path);
     }
 }

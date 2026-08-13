@@ -1,0 +1,77 @@
+{
+  "$schema": "https://store.greentic.cloud/schemas/describe-v2.json",
+  "apiVersion": "greentic.ai/v2",
+  "kind": "DesignExtension",
+  "compat": { "min_designer_version": ">=1.2.0", "min_runner_version": "^0.12.0", "contract_version": "1.2.0" },
+  "metadata": {
+    "id": "greentic.operala",
+    "name": "OperaLa Composer",
+    "version": "1.2.0",
+    "summary": "Author operational-behaviour handoff artifacts from a guided prompt session.",
+    "description": "Author and manage OperaLa operational behaviours anchored to a SoRLa contract.",
+    "author": { "name": "Greentic AI", "email": "team@greentic.ai" },
+    "license": "MIT"
+  },
+  "engine": { "greenticDesigner": ">=1.2.0", "extRuntime": "^1.2.0" },
+  "capabilities": { "offered": [ { "id": "greentic:operala/composition", "version": "1.0.0" } ], "required": [] },
+  "runtime": {
+    "memoryLimitMB": 64,
+    "permissions": { "llmRoles": ["operala_composer"] },
+    "components": {
+      "operala": {
+        "gtpack": { "file": "extension.wasm", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "pack_id": "greentic.operala", "component_version": "1.2.0" },
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "world": "greentic:operala-designer-extension/design-extension"
+      }
+    }
+  },
+  "contributions": {
+    "tools": [
+      {
+        "name": "list_operala_capabilities",
+        "export": "greentic:extension-design/tools.invoke-tool",
+        "capabilities": [
+          "flow"
+        ],
+        "description": "List all available OperaLa capabilities and their extension metadata.",
+        "input_schema": "{\"type\":\"object\",\"properties\":{}}"
+      },
+      {
+        "name": "generate_operala_answers",
+        "export": "greentic:extension-design/tools.invoke-tool",
+        "capabilities": [
+          "flow"
+        ],
+        "description": "Generate OperaLa capability answers from a SoRLa contract and a prompt.",
+        "input_schema": "{\"type\":\"object\",\"properties\":{\"sorla_yaml\":{\"type\":\"string\",\"description\":\"The SoRLa contract as YAML text (the whole document, not a path). Parsed with parse_sorla_contract_from_yaml; every catalog id referenced by the answers is resolved against it.\"},\"prompt\":{\"type\":\"string\",\"description\":\"Business prompt describing the operational behaviour to author.\"},\"capability\":{\"type\":\"string\",\"enum\":[\"reconciliation\",\"bulk_ingest\"],\"description\":\"Capability to author for. Omit to have the capability classified from `prompt`; the call fails if classification is inconclusive.\"}},\"required\":[\"sorla_yaml\",\"prompt\"]}"
+      },
+      {
+        "name": "update_operala_answers",
+        "export": "greentic:extension-design/tools.invoke-tool",
+        "capabilities": [
+          "flow"
+        ],
+        "description": "Update existing OperaLa capability answers from a change instruction.",
+        "input_schema": "{\"type\":\"object\",\"properties\":{\"sorla_yaml\":{\"type\":\"string\",\"description\":\"The SoRLa contract as YAML text (the whole document, not a path). Parsed with parse_sorla_contract_from_yaml; every catalog id referenced by the answers is resolved against it.\"},\"answers\":{\"type\":\"object\",\"description\":\"An OperaLa answers document (schema `greentic.operala.answers.v1`), normally the `answers` value returned by generate_operala_answers or update_operala_answers. Full JSON Schema: schemas/operala.answers.schema.json.\",\"required\":[\"schema\",\"intent\",\"extension\",\"sorla\",\"outputs\"],\"properties\":{\"schema\":{\"type\":\"string\",\"const\":\"greentic.operala.answers.v1\"},\"intent\":{\"type\":\"string\",\"description\":\"One-line statement of the operational intent these answers encode.\"},\"detected_capability\":{\"type\":\"string\",\"enum\":[\"reconciliation\",\"bulk_ingest\",\"business_events\"],\"description\":\"Capability inferred from the prompt when the caller did not pin one.\"},\"extension\":{\"type\":\"string\",\"enum\":[\"greentic.operala.reconciliation.v1\",\"greentic.operala.bulk_ingest.v1\",\"business_events\"],\"description\":\"Id of the OperaLa extension that owns `capability_answers`. Must resolve in the built-in extension registry, or the call fails with `unknown extension`.\"},\"locale\":{\"type\":\"string\",\"description\":\"BCP-47 locale, e.g. `en-GB`.\"},\"tenant\":{\"type\":\"string\"},\"team\":{\"type\":\"string\"},\"sorla\":{\"type\":\"object\",\"description\":\"Provenance of the SoRLa contract these answers were authored against.\",\"required\":[\"source\"],\"properties\":{\"source\":{\"type\":\"object\",\"required\":[\"kind\",\"uri\"],\"properties\":{\"kind\":{\"type\":\"string\",\"enum\":[\"file\",\"oci\",\"store\",\"repo\"]},\"uri\":{\"type\":\"string\"},\"digest\":{\"type\":\"string\"}}},\"expected_schema\":{\"type\":\"string\",\"description\":\"SoRLa schema version the answers assume, e.g. `greentic.sorla.v0.2`.\"}}},\"outputs\":{\"type\":\"object\",\"description\":\"Where the wizard writes handoff artifacts. At least one of handoff_path / gtpack_path is expected.\",\"required\":[\"work_dir\"],\"properties\":{\"handoff_path\":{\"type\":\"string\"},\"gtpack_path\":{\"type\":\"string\"},\"work_dir\":{\"type\":\"string\"}}},\"approval\":{\"type\":\"object\",\"properties\":{\"allow_sorla_patch_proposal\":{\"type\":\"boolean\",\"default\":false},\"apply_sorla_patch\":{\"type\":\"boolean\",\"default\":false,\"description\":\"OperaLa may propose SoRLa patches but must not apply them directly.\"}}},\"capability_answers\":{\"type\":\"object\",\"description\":\"Per-capability answer payload. Only the capability named by `extension` is read. The shape of each payload is defined by that extension's answers_schema() and is supplied to the model during generate_operala_answers.\",\"properties\":{\"reconciliation\":{\"type\":\"object\"},\"bulk_ingest\":{\"type\":\"object\"},\"business_events\":{\"type\":\"object\"}}},\"assumptions\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}},\"instruction\":{\"type\":\"string\",\"description\":\"Natural-language change to apply to `answers`, e.g. \\\"use batch mode only\\\".\"}},\"required\":[\"sorla_yaml\",\"answers\",\"instruction\"]}"
+      },
+      {
+        "name": "validate_operala_answers",
+        "export": "greentic:extension-design/tools.invoke-tool",
+        "capabilities": [
+          "flow"
+        ],
+        "description": "Validate OperaLa capability answers against a SoRLa contract.",
+        "input_schema": "{\"type\":\"object\",\"properties\":{\"sorla_yaml\":{\"type\":\"string\",\"description\":\"The SoRLa contract as YAML text (the whole document, not a path). Parsed with parse_sorla_contract_from_yaml; every catalog id referenced by the answers is resolved against it.\"},\"answers\":{\"type\":\"object\",\"description\":\"An OperaLa answers document (schema `greentic.operala.answers.v1`), normally the `answers` value returned by generate_operala_answers or update_operala_answers. Full JSON Schema: schemas/operala.answers.schema.json.\",\"required\":[\"schema\",\"intent\",\"extension\",\"sorla\",\"outputs\"],\"properties\":{\"schema\":{\"type\":\"string\",\"const\":\"greentic.operala.answers.v1\"},\"intent\":{\"type\":\"string\",\"description\":\"One-line statement of the operational intent these answers encode.\"},\"detected_capability\":{\"type\":\"string\",\"enum\":[\"reconciliation\",\"bulk_ingest\",\"business_events\"],\"description\":\"Capability inferred from the prompt when the caller did not pin one.\"},\"extension\":{\"type\":\"string\",\"enum\":[\"greentic.operala.reconciliation.v1\",\"greentic.operala.bulk_ingest.v1\",\"business_events\"],\"description\":\"Id of the OperaLa extension that owns `capability_answers`. Must resolve in the built-in extension registry, or the call fails with `unknown extension`.\"},\"locale\":{\"type\":\"string\",\"description\":\"BCP-47 locale, e.g. `en-GB`.\"},\"tenant\":{\"type\":\"string\"},\"team\":{\"type\":\"string\"},\"sorla\":{\"type\":\"object\",\"description\":\"Provenance of the SoRLa contract these answers were authored against.\",\"required\":[\"source\"],\"properties\":{\"source\":{\"type\":\"object\",\"required\":[\"kind\",\"uri\"],\"properties\":{\"kind\":{\"type\":\"string\",\"enum\":[\"file\",\"oci\",\"store\",\"repo\"]},\"uri\":{\"type\":\"string\"},\"digest\":{\"type\":\"string\"}}},\"expected_schema\":{\"type\":\"string\",\"description\":\"SoRLa schema version the answers assume, e.g. `greentic.sorla.v0.2`.\"}}},\"outputs\":{\"type\":\"object\",\"description\":\"Where the wizard writes handoff artifacts. At least one of handoff_path / gtpack_path is expected.\",\"required\":[\"work_dir\"],\"properties\":{\"handoff_path\":{\"type\":\"string\"},\"gtpack_path\":{\"type\":\"string\"},\"work_dir\":{\"type\":\"string\"}}},\"approval\":{\"type\":\"object\",\"properties\":{\"allow_sorla_patch_proposal\":{\"type\":\"boolean\",\"default\":false},\"apply_sorla_patch\":{\"type\":\"boolean\",\"default\":false,\"description\":\"OperaLa may propose SoRLa patches but must not apply them directly.\"}}},\"capability_answers\":{\"type\":\"object\",\"description\":\"Per-capability answer payload. Only the capability named by `extension` is read. The shape of each payload is defined by that extension's answers_schema() and is supplied to the model during generate_operala_answers.\",\"properties\":{\"reconciliation\":{\"type\":\"object\"},\"bulk_ingest\":{\"type\":\"object\"},\"business_events\":{\"type\":\"object\"}}},\"assumptions\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"required\":[\"sorla_yaml\",\"answers\"]}"
+      },
+      {
+        "name": "generate_handoff_pack",
+        "export": "greentic:extension-design/tools.invoke-tool",
+        "capabilities": [
+          "flow"
+        ],
+        "description": "Build OperaLa handoff pack entries from a SoRLa contract + answers.",
+        "input_schema": "{\"type\":\"object\",\"properties\":{\"sorla_yaml\":{\"type\":\"string\",\"description\":\"The SoRLa contract as YAML text (the whole document, not a path). Parsed with parse_sorla_contract_from_yaml; every catalog id referenced by the answers is resolved against it.\"},\"answers\":{\"type\":\"object\",\"description\":\"An OperaLa answers document (schema `greentic.operala.answers.v1`), normally the `answers` value returned by generate_operala_answers or update_operala_answers. Full JSON Schema: schemas/operala.answers.schema.json.\",\"required\":[\"schema\",\"intent\",\"extension\",\"sorla\",\"outputs\"],\"properties\":{\"schema\":{\"type\":\"string\",\"const\":\"greentic.operala.answers.v1\"},\"intent\":{\"type\":\"string\",\"description\":\"One-line statement of the operational intent these answers encode.\"},\"detected_capability\":{\"type\":\"string\",\"enum\":[\"reconciliation\",\"bulk_ingest\",\"business_events\"],\"description\":\"Capability inferred from the prompt when the caller did not pin one.\"},\"extension\":{\"type\":\"string\",\"enum\":[\"greentic.operala.reconciliation.v1\",\"greentic.operala.bulk_ingest.v1\",\"business_events\"],\"description\":\"Id of the OperaLa extension that owns `capability_answers`. Must resolve in the built-in extension registry, or the call fails with `unknown extension`.\"},\"locale\":{\"type\":\"string\",\"description\":\"BCP-47 locale, e.g. `en-GB`.\"},\"tenant\":{\"type\":\"string\"},\"team\":{\"type\":\"string\"},\"sorla\":{\"type\":\"object\",\"description\":\"Provenance of the SoRLa contract these answers were authored against.\",\"required\":[\"source\"],\"properties\":{\"source\":{\"type\":\"object\",\"required\":[\"kind\",\"uri\"],\"properties\":{\"kind\":{\"type\":\"string\",\"enum\":[\"file\",\"oci\",\"store\",\"repo\"]},\"uri\":{\"type\":\"string\"},\"digest\":{\"type\":\"string\"}}},\"expected_schema\":{\"type\":\"string\",\"description\":\"SoRLa schema version the answers assume, e.g. `greentic.sorla.v0.2`.\"}}},\"outputs\":{\"type\":\"object\",\"description\":\"Where the wizard writes handoff artifacts. At least one of handoff_path / gtpack_path is expected.\",\"required\":[\"work_dir\"],\"properties\":{\"handoff_path\":{\"type\":\"string\"},\"gtpack_path\":{\"type\":\"string\"},\"work_dir\":{\"type\":\"string\"}}},\"approval\":{\"type\":\"object\",\"properties\":{\"allow_sorla_patch_proposal\":{\"type\":\"boolean\",\"default\":false},\"apply_sorla_patch\":{\"type\":\"boolean\",\"default\":false,\"description\":\"OperaLa may propose SoRLa patches but must not apply them directly.\"}}},\"capability_answers\":{\"type\":\"object\",\"description\":\"Per-capability answer payload. Only the capability named by `extension` is read. The shape of each payload is defined by that extension's answers_schema() and is supplied to the model during generate_operala_answers.\",\"properties\":{\"reconciliation\":{\"type\":\"object\"},\"bulk_ingest\":{\"type\":\"object\"},\"business_events\":{\"type\":\"object\"}}},\"assumptions\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}},\"required\":[\"sorla_yaml\",\"answers\"]}"
+      }
+    ]
+  }
+}
