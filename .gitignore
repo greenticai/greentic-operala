@@ -1,3 +1,4 @@
 /target/
 /.tmp-tests/
 *.gtpack
+crates/*/dist/
