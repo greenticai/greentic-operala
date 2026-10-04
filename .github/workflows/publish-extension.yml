@@ -1,0 +1,105 @@
+name: Publish Extension
+
+# Publishes the greentic.operala design extension (.gtxpack) to the Greentic
+# Store as a STABLE release whenever a push to `main` changes the extension.
+#
+# Gates, all fail-closed:
+#   * describe.json and the crate Cargo.toml must agree on the version.
+#   * the version must be plain stable semver (no prerelease/build suffix).
+#   * the version must be strictly greater than the Store's latestStable.
+#   * the version must not already exist in the Store (skip, not overwrite).
+#   * the artifact must be signed: the action refuses to publish without
+#     EXT_SIGNING_KEY_PEM, and `allow-unsigned` is never set.
+#
+# There is deliberately no workflow_dispatch and no tag trigger: a publish is
+# caused by merging a version bump to main, nothing else.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/greentic-operala-designer-extension/**"
+      - ".github/workflows/publish-extension.yml"
+
+concurrency:
+  group: publish-extension
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  STORE_URL: https://store.greentic.cloud
+  EXT_ID: greentic.operala
+  EXT_DIR: crates/greentic-operala-designer-extension
+
+jobs:
+  publish:
+    name: Publish OperaLa extension to Greentic Store
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Gate on version
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          desc_ver=$(jq -r '.metadata.version' "$EXT_DIR/describe.json")
+          desc_id=$(jq -r '.metadata.id' "$EXT_DIR/describe.json")
+          cargo_ver=$(sed -nE '0,/^version *= *"([^"]+)".*/s//\1/p' "$EXT_DIR/Cargo.toml")
+
+          if [ "$desc_id" != "$EXT_ID" ]; then
+            echo "::error::describe.json id '$desc_id' is not '$EXT_ID'"; exit 1
+          fi
+          if [ "$desc_ver" != "$cargo_ver" ]; then
+            echo "::error::describe.json version '$desc_ver' != Cargo.toml version '$cargo_ver'"; exit 1
+          fi
+          if ! printf '%s' "$desc_ver" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::version '$desc_ver' is not stable semver; prerelease versions must not be published from main"
+            exit 1
+          fi
+
+          # The Store answers 404 for an extension it has never seen; anything
+          # else that is not 200 is an error, never "assume absent".
+          code=$(curl -sS --proto '=https' --tlsv1.2 -o store.json -w '%{http_code}' \
+            "$STORE_URL/api/v1/extensions/$EXT_ID")
+          case "$code" in
+            200) ;;
+            404) echo '{"versions":[],"latestStable":null}' > store.json ;;
+            *) echo "::error::Store lookup returned HTTP $code"; exit 1 ;;
+          esac
+
+          if jq -e --arg v "$desc_ver" '.versions | index($v)' store.json >/dev/null; then
+            echo "::notice::$EXT_ID@$desc_ver already exists in the Store; nothing to publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          latest=$(jq -r '.latestStable // empty' store.json)
+          if [ -n "$latest" ]; then
+            top=$(printf '%s\n%s\n' "$latest" "$desc_ver" | sort -V | tail -n1)
+            if [ "$top" != "$desc_ver" ]; then
+              echo "::error::version $desc_ver is not greater than Store latestStable $latest"; exit 1
+            fi
+          fi
+
+          echo "==> will publish $EXT_ID@$desc_ver (Store latestStable: ${latest:-none})"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "version=$desc_ver" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to Greentic Store
+        if: steps.gate.outputs.publish == 'true'
+        # greenticai/greentic-designer-extension-action v2 (b567f33)
+        uses: greenticai/greentic-designer-extension-action@b567f33f5c0706708ba280292b6333c9e9bfa847
+        with:
+          gtdx-version: "=1.2.22"
+          manifest: crates/greentic-operala-designer-extension/Cargo.toml
+          store-url: https://store.greentic.cloud
+          store-token: ${{ secrets.GREENTIC_STORE_TOKEN }}
+          # Authenticates and signs the upload; the action fails closed when
+          # this is empty. Never set allow-unsigned here.
+          signing-key-pem: ${{ secrets.EXT_SIGNING_KEY_PEM }}
+          version: ${{ steps.gate.outputs.version }}
+          rust-toolchain: "1.95.0"
