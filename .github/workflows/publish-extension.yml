@@ -94,7 +94,6 @@ jobs:
         # greenticai/greentic-designer-extension-action v2 (b567f33)
         uses: greenticai/greentic-designer-extension-action@b567f33f5c0706708ba280292b6333c9e9bfa847
         with:
-          gtdx-version: "=1.2.22"
           manifest: crates/greentic-operala-designer-extension/Cargo.toml
           store-url: https://store.greentic.cloud
           store-token: ${{ secrets.GREENTIC_STORE_TOKEN }}
