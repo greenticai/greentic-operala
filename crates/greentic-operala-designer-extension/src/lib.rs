@@ -64,12 +64,62 @@ pub fn generate_answers_with_chat(
     };
     let (ext_id, schema) = capability_ids(&capability)?;
     match op::inference::infer_capability_answers(chat, ext_id, &schema, &sorla, prompt, None) {
-        Ok(answers) => Ok(json!({ "answers": answers })),
+        Ok(answers) => {
+            let document = answers_document(&capability, ext_id, prompt, &sorla, answers)?;
+            Ok(json!({ "answers": document }))
+        }
         Err(e) if e.starts_with("follow-up required:") => Ok(json!({
             "follow_up": e.trim_start_matches("follow-up required:").trim()
         })),
         Err(e) => Err(e),
     }
+}
+
+/// Wrap the capability answers the model produced in the full
+/// `greentic.operala.answers.v1` document.
+///
+/// `update_operala_answers`, `validate_operala_answers` and
+/// `generate_handoff_pack` all take that whole document, and their schemas
+/// describe `answers` as "normally the value returned by generate". Returning
+/// only the capability body made every follow-up call fail with
+/// `missing field `schema``, so a session could be authored but never built.
+///
+/// `outputs` and `sorla.source` are required by the document type but only the
+/// CLI reads them (to write files); nothing here touches the filesystem.
+fn answers_document(
+    capability: &str,
+    extension_id: &str,
+    intent: &str,
+    sorla: &op::SorlaContract,
+    capability_answers: Value,
+) -> Result<Value, String> {
+    let name = capability_answers
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or(capability);
+    let work_dir = format!("target/operala/{name}");
+    let document = json!({
+        "schema": op::ANSWERS_SCHEMA,
+        "intent": intent,
+        "detected_capability": capability,
+        "extension": extension_id,
+        "sorla": {
+            "source": sorla.source,
+            "expected_schema": "greentic.sorla.v0.2",
+        },
+        "outputs": {
+            "handoff_path": format!("{work_dir}/operala-handoff.json"),
+            "gtpack_path": format!("{work_dir}/{}.gtpack", name.replace('_', "-")),
+            "work_dir": work_dir,
+        },
+        "approval": { "allow_sorla_patch_proposal": true, "apply_sorla_patch": false },
+        "capability_answers": { capability: capability_answers },
+    });
+    // Refuse to hand back a document the other tools would reject.
+    serde_json::from_value::<op::OperalaAnswers>(document.clone())
+        .map_err(|e| format!("generated answers document is invalid: {e}"))?;
+    Ok(document)
 }
 
 fn generate_answers_impl(input: &Value, chat: &dyn op::inference::ChatFn) -> Result<Value, String> {
@@ -316,7 +366,14 @@ mod tests {
         let out = invoke_tool("list_operala_capabilities", "{}").unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         let caps = v["capabilities"].as_array().unwrap();
-        assert_eq!(caps.len(), 2);
+        // `business_events` joined later, so assert the two this tool authors
+        // rather than a count that goes stale with every new capability.
+        for expected in ["reconciliation", "bulk_ingest"] {
+            assert!(
+                caps.iter().any(|c| c == expected),
+                "missing {expected}: {caps:?}"
+            );
+        }
     }
 
     // ── validate_operala_answers ─────────────────────────────────────────────
@@ -386,6 +443,36 @@ mod tests {
             result.get("answers").is_some(),
             "expected answers on first try with valid fixture payload, got: {result}"
         );
+    }
+
+    /// Regression: `generate` used to return only the capability body, which
+    /// `validate` and `generate_handoff_pack` rejected with
+    /// `missing field `schema``. What it returns must feed straight back in.
+    #[test]
+    fn generate_output_is_accepted_by_validate_and_handoff() {
+        let yaml = fixture_sorla_yaml();
+        let cap_answers = fixture_answers_value()["capability_answers"]["reconciliation"].clone();
+        let chat = ScriptedChat::new(vec![op::ChatResponse {
+            content: json!({ "emit_answers": cap_answers }).to_string(),
+            tool_calls: vec![],
+            finish_reason: op::FinishReason::Stop,
+        }]);
+        let input = json!({
+            "sorla_yaml": yaml,
+            "prompt": "reconcile rent payments",
+            "capability": "reconciliation"
+        });
+        let generated = generate_answers_with_chat(&input, &chat).unwrap();
+        let answers = generated["answers"].clone();
+        assert_eq!(answers["schema"], op::ANSWERS_SCHEMA);
+        assert_eq!(answers["extension"], op::EXTENSION_RECONCILIATION);
+        assert_eq!(answers["capability_answers"]["reconciliation"], cap_answers);
+
+        let args = json!({ "sorla_yaml": yaml, "answers": answers }).to_string();
+        let validated = invoke_tool("validate_operala_answers", &args).unwrap();
+        assert!(validated.contains("readiness"), "got: {validated}");
+        let handoff = invoke_tool("generate_handoff_pack", &args).unwrap();
+        assert!(handoff.contains("sha256"), "got: {handoff}");
     }
 
     // ── update_operala_answers (scripted ChatFn) ─────────────────────────────
