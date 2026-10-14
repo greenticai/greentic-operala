@@ -261,6 +261,7 @@ fn capability_ids(name: &str) -> Result<(&'static str, Value), String> {
     let ext_id: &'static str = match name {
         "reconciliation" => op::EXTENSION_RECONCILIATION,
         "bulk_ingest" => op::EXTENSION_BULK_INGEST,
+        "business_events" => op::EXTENSION_BUSINESS_EVENTS,
         other => return Err(format!("unknown capability `{other}`")),
     };
     let schema = op::ExtensionRegistry::built_in()
@@ -443,6 +444,48 @@ mod tests {
             result.get("answers").is_some(),
             "expected answers on first try with valid fixture payload, got: {result}"
         );
+    }
+
+    /// `list_operala_capabilities` advertises `business_events`, so `generate`
+    /// must be able to author it (it answered `unknown capability` before).
+    #[test]
+    fn generate_authors_every_capability_it_advertises() {
+        let listed: Value =
+            serde_json::from_str(&invoke_tool("list_operala_capabilities", "{}").unwrap()).unwrap();
+        for cap in listed["capabilities"].as_array().unwrap() {
+            let name = cap.as_str().unwrap();
+            assert!(
+                capability_ids(name).is_ok(),
+                "advertised but not authorable: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn business_events_answers_are_wrapped_and_round_trip() {
+        let yaml = fixture_sorla_yaml();
+        let chat = ScriptedChat::new(vec![op::ChatResponse {
+            content:
+                json!({ "emit_answers": { "name": "rent_events", "events": [], "triggers": [] } })
+                    .to_string(),
+            tool_calls: vec![],
+            finish_reason: op::FinishReason::Stop,
+        }]);
+        let input = json!({
+            "sorla_yaml": yaml,
+            "prompt": "publish rent events",
+            "capability": "business_events"
+        });
+        let generated = generate_answers_with_chat(&input, &chat).unwrap();
+        let answers = generated["answers"].clone();
+        assert_eq!(answers["extension"], op::EXTENSION_BUSINESS_EVENTS);
+        assert_eq!(
+            answers["capability_answers"]["business_events"]["name"],
+            "rent_events"
+        );
+        let args = json!({ "sorla_yaml": yaml, "answers": answers }).to_string();
+        let validated = invoke_tool("validate_operala_answers", &args).unwrap();
+        assert!(validated.contains("readiness"), "got: {validated}");
     }
 
     /// Regression: `generate` used to return only the capability body, which
