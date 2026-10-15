@@ -127,6 +127,24 @@ pub fn update_answers(
     sorla: &crate::SorlaContract,
     instruction: &str,
 ) -> OperalaResult<UpdateOutcome> {
+    let outcome = update_answers_unvalidated(chat, existing, sorla, instruction)?;
+    crate::validate_answers(&outcome.answers)?;
+    Ok(outcome)
+}
+
+/// [`update_answers`] without the final [`crate::validate_answers`] pass.
+///
+/// `validate_answers` is the CLI's gate before a pilot run: it needs a source
+/// uri, a tenant and every mapped field. A host that authors from an in-memory
+/// SoRLa document (the designer) never has the first two, and judges
+/// readiness separately with `analyse_sorla`, so it refines through this
+/// function and reports what is still missing instead of refusing the edit.
+pub fn update_answers_unvalidated(
+    chat: &dyn ChatFn,
+    existing: &crate::OperalaAnswers,
+    sorla: &crate::SorlaContract,
+    instruction: &str,
+) -> OperalaResult<UpdateOutcome> {
     use crate::OperaLaExtension;
 
     let (extension_id, schema, existing_value) = match (
@@ -174,8 +192,6 @@ pub fn update_answers(
             ));
         }
     }
-    crate::validate_answers(&updated)?;
-
     let old_doc = serde_json::to_value(existing).map_err(crate::to_string)?;
     let new_doc = serde_json::to_value(&updated).map_err(crate::to_string)?;
     Ok(UpdateOutcome {

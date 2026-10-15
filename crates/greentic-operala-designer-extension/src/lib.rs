@@ -140,7 +140,7 @@ pub fn update_answers_with_chat(
     let answers_value = input.get("answers").ok_or("missing answers")?;
     let existing: op::OperalaAnswers =
         serde_json::from_value(answers_value.clone()).map_err(|e| e.to_string())?;
-    let outcome = op::inference::update_answers(chat, &existing, &sorla, instruction)?;
+    let outcome = op::inference::update_answers_unvalidated(chat, &existing, &sorla, instruction)?;
     let diff: Vec<Value> = outcome
         .diff
         .iter()
@@ -552,6 +552,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn update_accepts_generated_answers_the_cli_gate_would_refuse() {
+        let yaml = fixture_sorla_yaml();
+        let mut answers_doc = fixture_answers_value();
+        // What generation leaves behind: no uri, no tenant.
+        answers_doc["sorla"]["source"]["uri"] = json!("");
+        answers_doc["tenant"] = Value::Null;
+        let cap_answers = answers_doc["capability_answers"]["reconciliation"].clone();
+        let chat = ScriptedChat::new(vec![op::ChatResponse {
+            content: json!({ "emit_answers": cap_answers }).to_string(),
+            tool_calls: vec![],
+            finish_reason: op::FinishReason::Stop,
+        }]);
+        let input = json!({
+            "sorla_yaml": yaml,
+            "answers": answers_doc,
+            "instruction": "use batch mode only"
+        });
+        let v = update_answers_with_chat(&input, &chat).expect("refine must not need pilot fields");
+        assert!(v.get("answers").is_some() && v.get("diff").is_some(), "{v}");
     }
 
     // ── unknown tool ─────────────────────────────────────────────────────────
