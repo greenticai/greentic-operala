@@ -6,7 +6,7 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 concurrency:
@@ -16,4 +16,6 @@ concurrency:
 jobs:
   dep-review:
     uses: greenticai/.github/.github/workflows/dependency-review.yml@main
+    # Kept: the org reusable workflow could not be inspected from here to confirm
+    # it needs no secrets. Drop once verified, to follow least privilege.
     secrets: inherit

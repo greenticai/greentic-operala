@@ -1852,6 +1852,7 @@ dependencies = [
  "greentic-pack-lib",
  "greentic-qa-lib 1.3.0-research.2 (git+https://github.com/greenticai/greentic-qa?rev=9203d8f)",
  "greentic-triggers",
+ "jsonschema",
  "semver",
  "serde",
  "serde_cbor",
@@ -1864,7 +1865,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-operala-designer-extension"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "base64 0.22.1",
  "greentic-operala",

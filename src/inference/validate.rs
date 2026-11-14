@@ -9,6 +9,14 @@ use crate::{
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+fn check_identifier(errors: &mut Vec<String>, path: &str, value: &str) {
+    if !crate::is_safe_identifier(value) {
+        errors.push(format!(
+            "{path}: '{value}' must match ^[a-z0-9][a-z0-9_-]*$"
+        ));
+    }
+}
+
 fn check_membership(
     errors: &mut Vec<String>,
     path: &str,
@@ -39,6 +47,7 @@ pub fn validate_capability_answers(
                 Ok(answers) => answers,
                 Err(err) => return Err(vec![format!("answers shape invalid: {err}")]),
             };
+            check_identifier(&mut errors, "name", &answers.name);
             check_membership(
                 &mut errors,
                 "source_event",
@@ -91,6 +100,10 @@ pub fn validate_capability_answers(
                 Ok(answers) => answers,
                 Err(err) => return Err(vec![format!("answers shape invalid: {err}")]),
             };
+            check_identifier(&mut errors, "name", &answers.name);
+            if answers.record_collections.is_empty() {
+                errors.push("record_collections: at least one collection is required".into());
+            }
             for (collection, record) in &answers.record_collections {
                 check_membership(
                     &mut errors,
@@ -118,17 +131,23 @@ pub fn validate_capability_answers(
 
             // Declared events, keyed on the dotted `domain.name` form so
             // trigger `emits` bindings can be checked against them below.
+            check_identifier(&mut errors, "name", &answers.name);
             let declared: BTreeSet<String> = answers
                 .events
                 .iter()
                 .map(|event| format!("{}.{}", event.domain, event.name))
                 .collect();
+            if answers.events.is_empty() {
+                errors.push("events: at least one event must be declared".into());
+            }
+            let mut seen_events = BTreeSet::new();
             for event in &answers.events {
-                if event.domain.trim().is_empty() || event.name.trim().is_empty() {
-                    errors.push(format!(
-                        "event '{}.{}' must have non-empty domain and name",
-                        event.domain, event.name
-                    ));
+                // Domain and name become file names and the `domain.name` key,
+                // so they must be non-empty slugs without `.` or `/`.
+                check_identifier(&mut errors, "event domain", &event.domain);
+                check_identifier(&mut errors, "event name", &event.name);
+                if !seen_events.insert(format!("{}.{}", event.domain, event.name)) {
+                    errors.push(format!("duplicate event '{}.{}'", event.domain, event.name));
                 }
                 if event.schema_version.trim().is_empty() {
                     errors.push(format!(
@@ -282,5 +301,87 @@ mod tests {
         assert!(joined.contains("id"), "got: {errors:?}");
         assert!(joined.contains("minute"), "got: {errors:?}");
         assert!(joined.contains("emits"), "got: {errors:?}");
+    }
+
+    #[test]
+    fn unsafe_names_are_rejected_for_every_capability() {
+        let sorla = fixture_sorla();
+        let mut recon = valid_reconciliation_value();
+        recon["name"] = Value::String("../x".into());
+        let errors =
+            validate_capability_answers(EXTENSION_RECONCILIATION, &recon, &sorla).unwrap_err();
+        assert!(errors.iter().any(|e| e.starts_with("name:")), "{errors:?}");
+
+        let bulk = serde_json::json!({
+            "name": "A/B",
+            "record_collections": {},
+            "actions": {},
+            "validation": {
+                "atomic": true,
+                "dry_run": true,
+                "require_unique_ids": true,
+                "validate_references": true
+            }
+        });
+        let errors = validate_capability_answers(EXTENSION_BULK_INGEST, &bulk, &sorla).unwrap_err();
+        assert!(errors.iter().any(|e| e.starts_with("name:")), "{errors:?}");
+
+        let events = serde_json::json!({
+            "name": "ok",
+            "events": [{ "domain": "a.b", "name": "c", "schema_version": "1" }],
+            "triggers": []
+        });
+        let errors =
+            validate_capability_answers(EXTENSION_BUSINESS_EVENTS, &events, &sorla).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.starts_with("event domain:")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_business_events_are_rejected() {
+        let sorla = fixture_sorla();
+        let event = serde_json::json!({ "domain": "a", "name": "c", "schema_version": "1" });
+        let events = serde_json::json!({
+            "name": "ok",
+            "events": [event.clone(), event],
+            "triggers": []
+        });
+        let errors =
+            validate_capability_answers(EXTENSION_BUSINESS_EVENTS, &events, &sorla).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("duplicate event")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn empty_event_and_collection_lists_are_rejected() {
+        let sorla = fixture_sorla();
+        let events = serde_json::json!({ "name": "ok", "events": [], "triggers": [] });
+        let errors =
+            validate_capability_answers(EXTENSION_BUSINESS_EVENTS, &events, &sorla).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.starts_with("events:")),
+            "{errors:?}"
+        );
+
+        let bulk = serde_json::json!({
+            "name": "ok",
+            "record_collections": {},
+            "actions": {},
+            "validation": {
+                "atomic": true,
+                "dry_run": true,
+                "require_unique_ids": true,
+                "validate_references": true
+            }
+        });
+        let errors = validate_capability_answers(EXTENSION_BULK_INGEST, &bulk, &sorla).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.starts_with("record_collections:")),
+            "{errors:?}"
+        );
     }
 }

@@ -29,7 +29,7 @@ const MAX_ATTEMPTS: usize = 3;
 /// Run LLM inference for one extension and gate the result deterministically.
 /// `existing_answers` switches update mode on. Returns the validated
 /// capability-answers JSON value, or `Err(follow_up_required(...))` when the
-/// model asks for clarification or exhausts its retries.
+/// model asks for clarification. Exhausted retries are a plain `Err`.
 pub fn infer_capability_answers(
     chat: &dyn ChatFn,
     extension_id: &str,
@@ -53,6 +53,17 @@ pub fn infer_capability_answers(
                 match validate_capability_answers(extension_id, &value, sorla) {
                     Ok(()) => return Ok(value),
                     Err(errors) => {
+                        // Echo the rejected object so the retry edits it instead of
+                        // regenerating every field from scratch.
+                        messages.push(greentic_llm::ChatMessage {
+                            role: greentic_llm::MessageRole::Assistant,
+                            content: if tools_supported {
+                                value.to_string()
+                            } else {
+                                serde_json::json!({ "emit_answers": value }).to_string()
+                            },
+                            images: vec![],
+                        });
                         messages.push(greentic_llm::ChatMessage {
                             role: greentic_llm::MessageRole::User,
                             content: format!(
@@ -77,11 +88,13 @@ pub fn infer_capability_answers(
             }
         }
     }
-    Err(follow_up_required(&format!(
-        "the LLM could not produce valid bindings after {} attempts ({}); please answer directly",
+    // Exhausted retries are a failure, not a clarifying question: no
+    // `follow-up required:` prefix, so hosts do not treat it as a model question.
+    Err(format!(
+        "the LLM could not produce valid bindings after {} attempts ({}); rephrase the intent or use --no-llm",
         MAX_ATTEMPTS,
         last_errors.join("; ")
-    )))
+    ))
 }
 
 /// One-shot capability classification for prompts the keyword fast-path could
@@ -93,7 +106,7 @@ pub fn classify_capability(chat: &dyn ChatFn, intent: &str) -> OperalaResult<Opt
         messages: vec![
             greentic_llm::ChatMessage {
                 role: greentic_llm::MessageRole::System,
-                content: "Classify the operator intent into one operational capability. Respond with ONLY a JSON object: {\"capability\": \"reconciliation\"} or {\"capability\": \"bulk_ingest\"} or {\"capability\": \"unknown\"}.".into(),
+                content: "Classify the operator intent into one operational capability. Respond with ONLY a JSON object: {\"capability\": \"reconciliation\"} or {\"capability\": \"bulk_ingest\"} or {\"capability\": \"business_events\"} or {\"capability\": \"unknown\"}.".into(),
                 images: vec![],
             },
             greentic_llm::ChatMessage {
@@ -113,6 +126,7 @@ pub fn classify_capability(chat: &dyn ChatFn, intent: &str) -> OperalaResult<Opt
     session::parse_classification(&response)
 }
 
+#[derive(Debug)]
 pub struct UpdateOutcome {
     pub answers: crate::OperalaAnswers,
     pub diff: Vec<diff::DiffEntry>,
@@ -147,24 +161,38 @@ pub fn update_answers_unvalidated(
 ) -> OperalaResult<UpdateOutcome> {
     use crate::OperaLaExtension;
 
-    let (extension_id, schema, existing_value) = match (
-        &existing.capability_answers.reconciliation,
-        &existing.capability_answers.bulk_ingest,
-    ) {
-        (Some(reconciliation), _) => (
-            crate::EXTENSION_RECONCILIATION,
-            crate::RECONCILIATION_EXTENSION.answers_schema(),
-            serde_json::to_value(reconciliation).map_err(crate::to_string)?,
-        ),
-        (None, Some(bulk)) => (
-            crate::EXTENSION_BULK_INGEST,
-            crate::BULK_INGEST_EXTENSION.answers_schema(),
-            serde_json::to_value(bulk).map_err(crate::to_string)?,
-        ),
-        (None, None) => {
-            return Err("existing answers contain no capability answers to update".to_string());
-        }
+    // The capability comes from `existing.extension`; a stray block for another
+    // capability must not be the one that gets rewritten.
+    let capability = &existing.capability_answers;
+    let selected = match existing.extension.as_str() {
+        crate::EXTENSION_RECONCILIATION => capability.reconciliation.as_ref().map(|answers| {
+            (
+                crate::RECONCILIATION_EXTENSION.answers_schema(),
+                serde_json::to_value(answers),
+            )
+        }),
+        crate::EXTENSION_BULK_INGEST => capability.bulk_ingest.as_ref().map(|answers| {
+            (
+                crate::BULK_INGEST_EXTENSION.answers_schema(),
+                serde_json::to_value(answers),
+            )
+        }),
+        crate::EXTENSION_BUSINESS_EVENTS => capability.business_events.as_ref().map(|answers| {
+            (
+                crate::BUSINESS_EVENTS_EXTENSION.answers_schema(),
+                serde_json::to_value(answers),
+            )
+        }),
+        _ => None,
     };
+    let Some((schema, existing_value)) = selected else {
+        return Err(format!(
+            "existing answers contain no `{}` capability answers to update",
+            existing.extension
+        ));
+    };
+    let existing_value = existing_value.map_err(crate::to_string)?;
+    let extension_id = existing.extension.as_str();
 
     let updated_value = infer_capability_answers(
         chat,
@@ -184,6 +212,10 @@ pub fn update_answers_unvalidated(
         }
         crate::EXTENSION_BULK_INGEST => {
             updated.capability_answers.bulk_ingest =
+                Some(serde_json::from_value(updated_value).map_err(crate::to_string)?);
+        }
+        crate::EXTENSION_BUSINESS_EVENTS => {
+            updated.capability_answers.business_events =
                 Some(serde_json::from_value(updated_value).map_err(crate::to_string)?);
         }
         other => {
@@ -432,7 +464,7 @@ mod driver_tests {
     }
 
     #[test]
-    fn driver_exhausts_retries_into_follow_up() {
+    fn driver_exhausts_retries_into_a_plain_error() {
         let mut bad = fixture_reconciliation_value();
         bad["source_event"] = serde_json::Value::String("ImaginaryEvent".into());
         let chat = scripted_chat(vec![emit(bad.clone()), emit(bad.clone()), emit(bad)]);
@@ -445,7 +477,7 @@ mod driver_tests {
             None,
         )
         .unwrap_err();
-        assert!(err.starts_with("follow-up required:"), "got: {err}");
+        assert!(!err.starts_with("follow-up required:"), "got: {err}");
         assert!(err.contains("ImaginaryEvent"), "got: {err}");
     }
 

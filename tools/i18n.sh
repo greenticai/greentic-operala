@@ -10,7 +10,7 @@ LOCALE="${LOCALE:-en}"
 EN_PATH="${EN_PATH:-all}"
 LOCALES_PATH="${LOCALES_PATH:-i18n/locales.json}"
 BATCH_SIZE="${I18N_BATCH_SIZE:-200}"
-TRANSLATOR_BIN="${TRANSLATOR_BIN:-greentic0i18n-translator}"
+TRANSLATOR_BIN="${TRANSLATOR_BIN:-greentic-i18n-translator}"
 
 auth_mode_supported() {
   if [[ "$AUTH_MODE" == "auto" || "$AUTH_MODE" == "api-key" || "$AUTH_MODE" == "browser" ]]; then
@@ -29,7 +29,7 @@ Environment overrides:
   AUTH_MODE=auto|api-key|browser    translator auth mode (default: auto)
   LOCALE=en                        CLI locale used for translator output (default: en)
   I18N_BATCH_SIZE=<int>            target translations per batch (default: 200)
-  TRANSLATOR_BIN=...               translator binary (default: greentic0i18n-translator)
+  TRANSLATOR_BIN=...               translator binary (default: greentic-i18n-translator)
 
 Modes:
   translate  Translate every discovered en.json to all supported locales in 200-item batches.
@@ -39,6 +39,15 @@ Modes:
 
 EOF_USAGE
 }
+
+TMP_DIRS=()
+cleanup_tmp_dirs() {
+  local dir
+  for dir in ${TMP_DIRS[@]+"${TMP_DIRS[@]}"}; do
+    rm -rf "$dir"
+  done
+}
+trap cleanup_tmp_dirs EXIT
 
 log() {
   printf '[i18n] %s\n' "$*"
@@ -119,14 +128,6 @@ locale_file_for() {
   local locale_dir
   locale_dir="$(dirname "$en_file")"
   printf '%s/%s.json\n' "$locale_dir" "$lang"
-}
-
-json_equal() {
-  local left="$1"
-  local right="$2"
-  jq -S . "$left" > /tmp/i18n-left.$$.$RANDOM.json
-  jq -S . "$right" > /tmp/i18n-right.$$.$RANDOM.json
-  cmp -s /tmp/i18n-left.$$.*.json /tmp/i18n-right.$$.*.json
 }
 
 locale_is_english_copy() {
@@ -297,7 +298,7 @@ run_translate() {
     local start=0
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "$tmp_dir"' RETURN
+    TMP_DIRS+=("$tmp_dir")
 
     while (( start < keys )); do
       local batch_file="$tmp_dir/en.${start}.json"
@@ -361,19 +362,21 @@ if [[ "${MODE}" == "-h" || "${MODE}" == "--help" ]]; then
   exit 0
 fi
 
-ensure_translator
-
 case "$MODE" in
   translate)
+    ensure_translator
     run_translate
     ;;
   validate)
+    ensure_translator
     run_validate
     ;;
   status)
+    ensure_translator
     run_status
     ;;
   all)
+    ensure_translator
     run_translate
     run_validate
     run_status

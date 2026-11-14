@@ -105,6 +105,10 @@ impl OperaLaExtension for BulkIngestExtension {
             }
         }
 
+        if bulk.record_collections.is_empty() {
+            missing.push("at least one record collection is required".to_string());
+        }
+
         if bulk.actions.is_empty() {
             warnings.push(
                 "no SoRLa actions were bound; runner must use generic record create/update semantics"
@@ -164,14 +168,7 @@ impl OperaLaExtension for BulkIngestExtension {
             extension_version: self.version().to_string(),
             tenant_required: true,
             team_optional: true,
-            sorla: HandoffSorla {
-                source: sorla.source.clone(),
-                source_digest: sorla.source_digest.clone(),
-                parser: "greentic-sorla-lib".to_string(),
-                required_schema: "greentic.sorla.v0.2".to_string(),
-                package_name: sorla.package_name.clone(),
-                package_version: sorla.package_version.clone(),
-            },
+            sorla: HandoffSorla::from_contract(sorla),
             sorx: SorxBindingTemplate {
                 transport: "http".to_string(),
                 url: "runtime-provided".to_string(),
@@ -259,15 +256,26 @@ fn collection_name(record: &str) -> String {
 
 fn find_create_action_for_record(actions: &[String], record: &str) -> Option<String> {
     let record_lower = record.to_ascii_lowercase();
+    let is_create_like = |action_lower: &str| {
+        action_lower.starts_with("create")
+            || action_lower.starts_with("add")
+            || action_lower.starts_with("record")
+            || action_lower.starts_with("assign")
+    };
+    // `create_payment` must win over `create_payment_plan` for record `Payment`,
+    // whatever order the contract lists them in.
+    let record_snake = to_snake_case(record);
+    let exact = format!("create_{record_snake}");
     actions
         .iter()
-        .find(|action| {
-            let action_lower = action.to_ascii_lowercase();
-            action_lower.contains(&record_lower)
-                && (action_lower.starts_with("create")
-                    || action_lower.starts_with("add")
-                    || action_lower.starts_with("record")
-                    || action_lower.starts_with("assign"))
+        .find(|action| to_snake_case(action) == exact)
+        .or_else(|| {
+            actions.iter().find(|action| {
+                let action_lower = action.to_ascii_lowercase();
+                (action_lower.contains(&record_lower)
+                    || to_snake_case(action).contains(&record_snake))
+                    && is_create_like(&action_lower)
+            })
         })
         .cloned()
 }
@@ -359,4 +367,59 @@ fn bulk_upload_schema(bulk: &BulkIngestAnswers) -> Value {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn actions(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn exact_create_action_wins_regardless_of_order() {
+        for order in [
+            ["create_payment_plan", "create_payment"],
+            ["create_payment", "create_payment_plan"],
+        ] {
+            assert_eq!(
+                find_create_action_for_record(&actions(&order), "Payment").as_deref(),
+                Some("create_payment")
+            );
+        }
+    }
+
+    #[test]
+    fn camel_case_exact_action_wins_regardless_of_order() {
+        assert_eq!(
+            find_create_action_for_record(
+                &actions(&["createPaymentPlan", "createPayment"]),
+                "Payment"
+            )
+            .as_deref(),
+            Some("createPayment")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_substring_create_like_action() {
+        assert_eq!(
+            find_create_action_for_record(&actions(&["add_payment_note"]), "Payment").as_deref(),
+            Some("add_payment_note")
+        );
+        assert_eq!(
+            find_create_action_for_record(&actions(&["create_rent_obligation"]), "RentObligation")
+                .as_deref(),
+            Some("create_rent_obligation")
+        );
+    }
+
+    #[test]
+    fn non_create_actions_are_not_bound() {
+        assert_eq!(
+            find_create_action_for_record(&actions(&["delete_payment"]), "Payment"),
+            None
+        );
+    }
 }

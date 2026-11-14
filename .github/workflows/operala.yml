@@ -7,6 +7,9 @@ on:
       - main
       - master
 
+permissions:
+  contents: read
+
 concurrency:
   group: operala-${{ github.ref }}
   cancel-in-progress: true
@@ -23,11 +26,15 @@ jobs:
       - name: Install ripgrep and jq
         run: sudo apt-get update && sudo apt-get install -y ripgrep jq
       - name: Install cargo-binstall
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cargo install cargo-binstall --locked
       - name: Check OperaLa authoring surface
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cargo fmt --all -- --check
-          cargo clippy --all-targets --all-features -- -D warnings
-          cargo test --all-features
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features
           bash scripts/validate_codex_material.sh
           bash tools/i18n.sh validate

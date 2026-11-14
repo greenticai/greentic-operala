@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 // CLI-only: clap argument parsing
@@ -106,10 +106,14 @@ impl LocalCacheArtifactResolver {
         let path = if is_distributed_reference(reference) {
             self.root.join(distributed_cache_file_name(reference))
         } else {
-            reference
+            // A `@sha256:` pin is verified separately; it is not part of the path.
+            let location = reference
+                .split_once("@sha256:")
+                .map_or(reference, |(location, _)| location);
+            location
                 .strip_prefix("file://")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(reference))
+                .unwrap_or_else(|| PathBuf::from(location))
         };
         if !path.exists() {
             return Err(format!(
@@ -463,6 +467,20 @@ pub struct HandoffSorla {
     pub package_version: String,
 }
 
+impl HandoffSorla {
+    /// The SoRLa reference every handoff records, whatever the capability.
+    pub fn from_contract(sorla: &SorlaContract) -> Self {
+        Self {
+            source: sorla.source.clone(),
+            source_digest: sorla.source_digest.clone(),
+            parser: "greentic-sorla-lib".to_string(),
+            required_schema: "greentic.sorla.v0.2".to_string(),
+            package_name: sorla.package_name.clone(),
+            package_version: sorla.package_version.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SorxBindingTemplate {
     pub transport: String,
@@ -487,6 +505,8 @@ pub struct WizardState {
     pub stages: Vec<WizardStageState>,
     pub resumed_from_existing_state: bool,
     pub unresolved_questions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -746,14 +766,7 @@ impl ReconciliationExtension {
             extension_version: self.version().to_string(),
             tenant_required: true,
             team_optional: true,
-            sorla: HandoffSorla {
-                source: sorla.source.clone(),
-                source_digest: sorla.source_digest.clone(),
-                parser: "greentic-sorla-lib".to_string(),
-                required_schema: "greentic.sorla.v0.2".to_string(),
-                package_name: sorla.package_name.clone(),
-                package_version: sorla.package_version.clone(),
-            },
+            sorla: HandoffSorla::from_contract(sorla),
             sorx: SorxBindingTemplate {
                 transport: "http".to_string(),
                 url: "runtime-provided".to_string(),
@@ -1103,7 +1116,7 @@ impl OperaLaExtension for BusinessEventsExtension {
         let mut schemas = BTreeMap::new();
         for event in &be.events {
             schemas.insert(
-                format!("{}-{}", event.domain, event.name),
+                business_event_schema_key(event),
                 business_event_payload_schema(event),
             );
         }
@@ -1115,14 +1128,7 @@ impl OperaLaExtension for BusinessEventsExtension {
             extension_version: self.version().to_string(),
             tenant_required: true,
             team_optional: true,
-            sorla: HandoffSorla {
-                source: sorla.source.clone(),
-                source_digest: sorla.source_digest.clone(),
-                parser: "greentic-sorla-lib".to_string(),
-                required_schema: "greentic.sorla.v0.2".to_string(),
-                package_name: sorla.package_name.clone(),
-                package_version: sorla.package_version.clone(),
-            },
+            sorla: HandoffSorla::from_contract(sorla),
             sorx: SorxBindingTemplate {
                 transport: "http".to_string(),
                 url: "runtime-provided".to_string(),
@@ -1140,6 +1146,31 @@ impl OperaLaExtension for BusinessEventsExtension {
             tests: vec!["business-events.sample.json".to_string()],
             readiness: readiness.clone(),
         })
+    }
+}
+
+/// Schema file key for a declared event. `.` cannot appear in `domain` or
+/// `name` (see [`is_safe_identifier`]), so distinct events never collide.
+fn business_event_schema_key(event: &EventDecl) -> String {
+    format!("{}.{}", event.domain, event.name)
+}
+
+/// Names that end up in file paths: lowercase/digit start, then `[a-z0-9_-]`.
+pub fn is_safe_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
+}
+
+fn require_safe_identifier(label: &str, value: &str) -> OperalaResult<()> {
+    if is_safe_identifier(value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label} `{value}` must match ^[a-z0-9][a-z0-9_-]*$"
+        ))
     }
 }
 
@@ -1298,91 +1329,97 @@ pub fn prompt_answers_with_llm(
     })?;
     let capability = detect_capability(&args.prompt, llm)?;
 
-    let (extension, reconciliation, bulk_ingest, business_events, output_name) =
-        match (capability, llm) {
-            ("reconciliation", Some(chat)) => {
-                let value = inference::infer_capability_answers(
-                    chat,
-                    EXTENSION_RECONCILIATION,
-                    &RECONCILIATION_EXTENSION.answers_schema(),
-                    &sorla,
-                    &args.prompt,
-                    None,
-                )?;
-                let reconciliation: ReconciliationAnswers =
-                    serde_json::from_value(value).map_err(to_string)?;
-                (
-                    EXTENSION_RECONCILIATION.to_string(),
-                    Some(reconciliation.clone()),
-                    None,
-                    None,
-                    reconciliation.name.clone(),
-                )
-            }
-            ("bulk_ingest", Some(chat)) => {
-                let value = inference::infer_capability_answers(
-                    chat,
-                    EXTENSION_BULK_INGEST,
-                    &BULK_INGEST_EXTENSION.answers_schema(),
-                    &sorla,
-                    &args.prompt,
-                    None,
-                )?;
-                let bulk: BulkIngestAnswers = serde_json::from_value(value).map_err(to_string)?;
-                (
-                    EXTENSION_BULK_INGEST.to_string(),
-                    None,
-                    Some(bulk.clone()),
-                    None,
-                    bulk.name.clone(),
-                )
-            }
-            ("business_events", Some(chat)) => {
-                let value = inference::infer_capability_answers(
-                    chat,
-                    EXTENSION_BUSINESS_EVENTS,
-                    &BUSINESS_EVENTS_EXTENSION.answers_schema(),
-                    &sorla,
-                    &args.prompt,
-                    None,
-                )?;
-                let business_events: BusinessEventsAnswers =
-                    serde_json::from_value(value).map_err(to_string)?;
-                (
-                    EXTENSION_BUSINESS_EVENTS.to_string(),
-                    None,
-                    None,
-                    Some(business_events.clone()),
-                    business_events.name.clone(),
-                )
-            }
-            ("bulk_ingest", None) => {
-                let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
-                (
-                    EXTENSION_BULK_INGEST.to_string(),
-                    None,
-                    Some(bulk.clone()),
-                    None,
-                    bulk.name.clone(),
-                )
-            }
-            ("reconciliation", None) => {
-                let reconciliation = infer_reconciliation_answers(&sorla)?;
-                (
-                    EXTENSION_RECONCILIATION.to_string(),
-                    Some(reconciliation.clone()),
-                    None,
-                    None,
-                    reconciliation.name.clone(),
-                )
-            }
-            (other, None) => {
-                return Err(format!("unsupported capability '{other}'"));
-            }
-            (other, Some(_)) => {
-                return Err(format!("unsupported capability '{other}'"));
-            }
-        };
+    let (extension, reconciliation, bulk_ingest, business_events, output_name) = match (
+        capability, llm,
+    ) {
+        ("reconciliation", Some(chat)) => {
+            let value = inference::infer_capability_answers(
+                chat,
+                EXTENSION_RECONCILIATION,
+                &RECONCILIATION_EXTENSION.answers_schema(),
+                &sorla,
+                &args.prompt,
+                None,
+            )?;
+            let reconciliation: ReconciliationAnswers =
+                serde_json::from_value(value).map_err(to_string)?;
+            (
+                EXTENSION_RECONCILIATION.to_string(),
+                Some(reconciliation.clone()),
+                None,
+                None,
+                reconciliation.name.clone(),
+            )
+        }
+        ("bulk_ingest", Some(chat)) => {
+            let value = inference::infer_capability_answers(
+                chat,
+                EXTENSION_BULK_INGEST,
+                &BULK_INGEST_EXTENSION.answers_schema(),
+                &sorla,
+                &args.prompt,
+                None,
+            )?;
+            let bulk: BulkIngestAnswers = serde_json::from_value(value).map_err(to_string)?;
+            (
+                EXTENSION_BULK_INGEST.to_string(),
+                None,
+                Some(bulk.clone()),
+                None,
+                bulk.name.clone(),
+            )
+        }
+        ("business_events", Some(chat)) => {
+            let value = inference::infer_capability_answers(
+                chat,
+                EXTENSION_BUSINESS_EVENTS,
+                &BUSINESS_EVENTS_EXTENSION.answers_schema(),
+                &sorla,
+                &args.prompt,
+                None,
+            )?;
+            let business_events: BusinessEventsAnswers =
+                serde_json::from_value(value).map_err(to_string)?;
+            (
+                EXTENSION_BUSINESS_EVENTS.to_string(),
+                None,
+                None,
+                Some(business_events.clone()),
+                business_events.name.clone(),
+            )
+        }
+        ("bulk_ingest", None) => {
+            let bulk = bulk_ingest::infer_answers(&sorla, &args.prompt);
+            (
+                EXTENSION_BULK_INGEST.to_string(),
+                None,
+                Some(bulk.clone()),
+                None,
+                bulk.name.clone(),
+            )
+        }
+        ("reconciliation", None) => {
+            let reconciliation = infer_reconciliation_answers(&sorla)?;
+            (
+                EXTENSION_RECONCILIATION.to_string(),
+                Some(reconciliation.clone()),
+                None,
+                None,
+                reconciliation.name.clone(),
+            )
+        }
+        ("business_events", None) => {
+            return Err(
+                    "the business_events capability needs an LLM to author events and triggers; configure --llm-provider/--llm-model or pick another capability"
+                        .to_string(),
+                );
+        }
+        (other, _) => {
+            return Err(format!("unsupported capability '{other}'"));
+        }
+    };
+    // The name may come from an LLM and becomes a directory and file name.
+    require_safe_identifier("capability name", &output_name)?;
     let work_dir = PathBuf::from(format!("target/operala/{output_name}"));
     let gtpack_file_name = format!("{}.gtpack", output_name.replace('_', "-"));
     Ok(OperalaAnswers {
@@ -1505,18 +1542,54 @@ pub fn load_answers(reference: &str) -> OperalaResult<OperalaAnswers> {
     let path = resolve_local_path(reference, None, None)?;
     let bytes = fs::read(&path)
         .map_err(|err| format!("failed to read answers {}: {err}", path.display()))?;
+    verify_reference_digest(reference, None, &format!("sha256:{}", sha256_hex(&bytes)))?;
     serde_json::from_slice(&bytes)
         .map_err(|err| format!("failed to parse answers {}: {err}", path.display()))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
-    let state_path = answers.outputs.work_dir.join("operala.state.json");
-    let resumed = state_path.exists();
-    write_wizard_state(&state_path, "running", &["load_answers"], resumed, &[])?;
+    // Before anything is written: the state file lives under `outputs.work_dir`,
+    // which validation constrains.
     validate_answers(answers)?;
+    let state_path = answers.outputs.work_dir.join("operala.state.json");
+    run_wizard_stages(answers, &state_path).inspect_err(|err| {
+        mark_wizard_failed(&state_path, err);
+    })
+}
+
+/// Best effort: a failed run must not stay recorded as `running`. The stage
+/// list written so far is kept so the operator can see where it stopped.
+#[cfg(not(target_arch = "wasm32"))]
+fn mark_wizard_failed(state_path: &Path, error: &str) {
+    let warn = |reason: String| {
+        eprintln!(
+            "warning: could not record failed wizard state at {}: {reason}",
+            state_path.display()
+        );
+    };
+    let bytes = match fs::read(state_path) {
+        Ok(bytes) => bytes,
+        Err(err) => return warn(err.to_string()),
+    };
+    let mut state = match serde_json::from_slice::<WizardState>(&bytes) {
+        Ok(state) => state,
+        Err(err) => return warn(err.to_string()),
+    };
+    state.status = "failed".to_string();
+    state.error = Some(error.to_string());
+    // The original error is what the caller sees; a failed update only warns.
+    if let Err(err) = write_json_file(state_path, &state) {
+        warn(err);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_wizard_stages(answers: &OperalaAnswers, state_path: &Path) -> OperalaResult<Value> {
+    let resumed = state_path.exists();
+    write_wizard_state(state_path, "running", &["load_answers"], resumed, &[])?;
     write_wizard_state(
-        &state_path,
+        state_path,
         "running",
         &["load_answers", "validate_answers_schema"],
         resumed,
@@ -1524,7 +1597,7 @@ pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
     )?;
     let sorla = load_sorla_contract(&answers.sorla.source)?;
     write_wizard_state(
-        &state_path,
+        state_path,
         "running",
         &["load_answers", "validate_answers_schema", "resolve_sorla"],
         resumed,
@@ -1542,7 +1615,7 @@ pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
         )
     })?;
     write_wizard_state(
-        &state_path,
+        state_path,
         "running",
         &[
             "load_answers",
@@ -1555,7 +1628,7 @@ pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
     )?;
     let readiness = extension.analyse_sorla(&sorla, answers)?;
     write_wizard_state(
-        &state_path,
+        state_path,
         "running",
         &[
             "load_answers",
@@ -1581,7 +1654,7 @@ pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
     let patch_proposal = sorla_patch_proposal(&readiness, &sorla)?;
     write_json_file(&patch_path, &patch_proposal)?;
     write_wizard_state(
-        &state_path,
+        state_path,
         "running",
         &[
             "load_answers",
@@ -1622,7 +1695,7 @@ pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
         write_operala_gtpack(&work_dir_gtpack_path, &handoff, answers)?;
     }
     write_wizard_state(
-        &state_path,
+        state_path,
         "running",
         &[
             "load_answers",
@@ -1641,10 +1714,17 @@ pub fn run_wizard(answers: &OperalaAnswers) -> OperalaResult<Value> {
     let lock_path = answers.outputs.work_dir.join("operala.build.lock");
     write_json_file(&lock_path, &lock)?;
     let summary_path = answers.outputs.work_dir.join("build.summary.md");
-    fs::write(&summary_path, build_summary(&readiness, &handoff))
-        .map_err(|err| format!("failed to write {}: {err}", summary_path.display()))?;
+    fs::write(
+        &summary_path,
+        build_summary(
+            &readiness,
+            &handoff,
+            patch_proposal["status"].as_str().unwrap_or("not_needed"),
+        ),
+    )
+    .map_err(|err| format!("failed to write {}: {err}", summary_path.display()))?;
     write_wizard_state(
-        &state_path,
+        state_path,
         "complete",
         WIZARD_STAGES,
         resumed,
@@ -1714,6 +1794,29 @@ pub fn validate_answers(answers: &OperalaAnswers) -> OperalaResult<()> {
             )
         ));
     }
+    for (label, path) in [
+        ("outputs.work_dir", Some(&answers.outputs.work_dir)),
+        (
+            "outputs.handoff_path",
+            answers.outputs.handoff_path.as_ref(),
+        ),
+        ("outputs.gtpack_path", answers.outputs.gtpack_path.as_ref()),
+    ] {
+        if path.is_some_and(|path| {
+            path.components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        }) {
+            return Err(format!("{label} must not contain `..`"));
+        }
+    }
+    if let Some(handoff_path) = &answers.outputs.handoff_path
+        && handoff_path.extension().is_none_or(|ext| ext != "json")
+    {
+        return Err(format!(
+            "outputs.handoff_path `{}` must be a .json file",
+            handoff_path.display()
+        ));
+    }
     if answers.outputs.handoff_path.is_none() && answers.outputs.gtpack_path.is_none() {
         return Err(format!(
             "{}: outputs.handoff_path",
@@ -1743,6 +1846,7 @@ pub fn validate_answers(answers: &OperalaAnswers) -> OperalaResult<()> {
             .reconciliation
             .as_ref()
             .ok_or_else(|| "capability_answers.reconciliation is required".to_string())?;
+        require_safe_identifier("capability_answers.reconciliation.name", &recon.name)?;
         if recon.input_modes.is_empty() {
             return Err("capability_answers.reconciliation.input_modes is required".to_string());
         }
@@ -1801,6 +1905,7 @@ pub fn validate_answers(answers: &OperalaAnswers) -> OperalaResult<()> {
         if bulk.name.trim().is_empty() {
             return Err("capability_answers.bulk_ingest.name is required".to_string());
         }
+        require_safe_identifier("capability_answers.bulk_ingest.name", &bulk.name)?;
         if bulk.record_collections.is_empty() {
             return Err(
                 "capability_answers.bulk_ingest.record_collections is required".to_string(),
@@ -1813,6 +1918,47 @@ pub fn validate_answers(answers: &OperalaAnswers) -> OperalaResult<()> {
                 ));
             }
         }
+    } else if answers.extension == EXTENSION_BUSINESS_EVENTS {
+        let be = answers
+            .capability_answers
+            .business_events
+            .as_ref()
+            .ok_or_else(|| "capability_answers.business_events is required".to_string())?;
+        require_safe_identifier("capability_answers.business_events.name", &be.name)?;
+        if be.events.is_empty() {
+            return Err("capability_answers.business_events.events is required".to_string());
+        }
+        let mut seen_events = BTreeSet::new();
+        for event in &be.events {
+            require_safe_identifier(
+                "capability_answers.business_events event domain",
+                &event.domain,
+            )?;
+            require_safe_identifier("capability_answers.business_events event name", &event.name)?;
+            if !seen_events.insert(business_event_schema_key(event)) {
+                return Err(format!(
+                    "capability_answers.business_events declares event `{}.{}` more than once",
+                    event.domain, event.name
+                ));
+            }
+        }
+        let mut seen_triggers = BTreeSet::new();
+        for trigger in &be.triggers {
+            if !seen_triggers.insert(trigger.id.as_str()) {
+                return Err(format!(
+                    "capability_answers.business_events declares trigger `{}` more than once",
+                    trigger.id
+                ));
+            }
+        }
+    }
+    if let Some(gtpack_path) = &answers.outputs.gtpack_path
+        && gtpack_path.extension().is_none_or(|ext| ext != "gtpack")
+    {
+        return Err(format!(
+            "outputs.gtpack_path `{}` must be a .gtpack file",
+            gtpack_path.display()
+        ));
     }
     Ok(())
 }
@@ -1893,19 +2039,14 @@ fn infer_reconciliation_answers(sorla: &SorlaContract) -> OperalaResult<Reconcil
             "Which SoRLa record represents the expected obligation or invoice to match against?",
         )
     })?;
-    let settlement_record = pick(&sorla.records, &["Payment", "Receipt", "Allocation"])
-        .ok_or_else(|| {
-            follow_up_required("Which SoRLa record should store the settled payment or allocation?")
-        })?;
-    let exception_record = pick(
+    // No fallback to an arbitrary record: binding settlements to e.g. `Tenant`
+    // would hide the gap. The preferred default name stays unbound so readiness
+    // reports it missing and the SoRLa patch proposal can add it.
+    let settlement_record = pick_preferred(&sorla.records, &["Payment", "Receipt", "Allocation"]);
+    let exception_record = pick_preferred(
         &sorla.records,
         &["ReconciliationCase", "ManualReviewCase", "PaymentException"],
-    )
-    .ok_or_else(|| {
-        follow_up_required(
-            "Which SoRLa record should store reconciliation exceptions for manual review?",
-        )
-    })?;
+    );
 
     Ok(ReconciliationAnswers {
         name: "tenancy_rent_reconciliation".to_string(),
@@ -2169,7 +2310,6 @@ fn build_lock(
     Ok(json!({
         "schema": "greentic.operala.build-lock.v1",
         "answers_digest": format!("sha256:{}", sha256_hex(&answers_bytes)),
-        "resolved_answers_digest": format!("sha256:{}", sha256_hex(&answers_bytes)),
         "sorla_source_digest": sorla.source_digest,
         "extension": handoff.extension,
         "extension_version": handoff.extension_version,
@@ -2178,7 +2318,11 @@ fn build_lock(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn build_summary(readiness: &ReadinessReport, handoff: &OperaLaHandoff) -> String {
+fn build_summary(
+    readiness: &ReadinessReport,
+    handoff: &OperaLaHandoff,
+    patch_status: &str,
+) -> String {
     let locale = None;
     let unresolved = if readiness.missing.is_empty() {
         format!("{}\n", t("operala.summary.unresolved_none", locale))
@@ -2201,10 +2345,10 @@ fn build_summary(readiness: &ReadinessReport, handoff: &OperaLaHandoff) -> Strin
         readiness.status,
         handoff.extension,
         readiness.summary,
-        if readiness.missing.is_empty() {
-            "not needed"
-        } else {
-            "proposed, not applied"
+        match patch_status {
+            "proposed" => "proposed, not applied",
+            "manual_required" => "manual SoRLa changes required",
+            _ => "not needed",
         },
         unresolved
     )
@@ -2212,19 +2356,16 @@ fn build_summary(readiness: &ReadinessReport, handoff: &OperaLaHandoff) -> Strin
 
 #[cfg(not(target_arch = "wasm32"))]
 fn capability_output_name(answers: &OperalaAnswers, handoff: &OperaLaHandoff) -> String {
-    answers
-        .capability_answers
-        .bulk_ingest
-        .as_ref()
-        .map(|bulk| bulk.name.clone())
-        .or_else(|| {
-            answers
-                .capability_answers
-                .reconciliation
-                .as_ref()
-                .map(|recon| recon.name.clone())
-        })
-        .unwrap_or_else(|| handoff.capability.clone())
+    // Follow `answers.extension`, the capability `validate_answers` checked; a
+    // stray block for another capability must never name files.
+    let capability = &answers.capability_answers;
+    match answers.extension.as_str() {
+        EXTENSION_BULK_INGEST => capability.bulk_ingest.as_ref().map(|a| a.name.clone()),
+        EXTENSION_RECONCILIATION => capability.reconciliation.as_ref().map(|a| a.name.clone()),
+        EXTENSION_BUSINESS_EVENTS => capability.business_events.as_ref().map(|a| a.name.clone()),
+        _ => None,
+    }
+    .unwrap_or_else(|| handoff.capability.clone())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2254,6 +2395,7 @@ fn write_wizard_state(
             stages,
             resumed_from_existing_state: resumed,
             unresolved_questions: unresolved_questions.to_vec(),
+            error: None,
         },
     )
 }
@@ -2491,7 +2633,7 @@ fn build_operala_pack_builder(
 ///
 /// NOTE: does not receive `answers`, so `business_events` packs built via this entrypoint
 /// (e.g. the wasm designer-extension path) do not get the inline `greentic.triggers.v1` /
-/// `greentic.business-events.v1` extensions — only [`write_operala_gtpack`] (native, driven
+/// `greentic.business-events.v1` extensions — only `write_operala_gtpack` (native, driven
 /// by `run_wizard`) does. See `build_operala_pack_builder`'s `answers` parameter.
 pub fn build_operala_pack_entries(
     handoff: &OperaLaHandoff,
@@ -2511,6 +2653,14 @@ fn write_operala_gtpack(
         fs::remove_file(path)
             .map_err(|err| format!("failed to replace pack file {}: {err}", path.display()))?;
     } else if path.is_dir() {
+        // Only replace a directory that is an exploded pack; anything else is a
+        // misconfigured `gtpack_path` and deleting it would destroy user data.
+        if !path.join("manifest.cbor").is_file() {
+            return Err(format!(
+                "refusing to replace directory {} with a pack archive: it is not an exploded pack (no manifest.cbor); set outputs.gtpack_path to a .gtpack file",
+                path.display()
+            ));
+        }
         fs::remove_dir_all(path).map_err(|err| {
             format!(
                 "failed to replace pack directory {} with archive: {err}",
@@ -2615,6 +2765,18 @@ fn pick(candidates: &[String], preferred: &[&str]) -> Option<String> {
         .find(|name| candidates.iter().any(|candidate| candidate == **name))
         .map(|value| (*value).to_string())
         .or_else(|| candidates.first().cloned())
+}
+
+/// First preferred name present in `candidates`, else the first preferred name
+/// (never an unrelated candidate).
+#[cfg(not(target_arch = "wasm32"))]
+fn pick_preferred(candidates: &[String], preferred: &[&str]) -> String {
+    preferred
+        .iter()
+        .find(|name| candidates.iter().any(|candidate| candidate == **name))
+        .or(preferred.first())
+        .map(|value| (*value).to_string())
+        .unwrap_or_default()
 }
 
 fn to_snake_case(value: &str) -> String {
@@ -2841,7 +3003,7 @@ fn localized_operala_help(locale: Option<&str>) -> String {
 #[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
 fn localized_operala_prompt_help(locale: Option<&str>) -> String {
     format!(
-        "{about}\n\n{usage}: greentic-operala prompt --sorla <FILE> [OPTIONS] <PROMPT>\n\n{options}:\n      --sorla <FILE>     {sorla_option}\n      --locale <LOCALE>  {locale_option}\n      --output <FILE>    {output_option}\n      --tenant <TENANT>  {tenant_option}\n      --team <TEAM>      {team_option}\n  -h, --help             {help_option}\n",
+        "{about}\n\n{usage}: greentic-operala prompt --sorla <FILE> [OPTIONS] <PROMPT>\n\n{options}:\n      --sorla <FILE>     {sorla_option}\n      --locale <LOCALE>  {locale_option}\n      --output <FILE>    {output_option}\n      --tenant <TENANT>  {tenant_option}\n      --team <TEAM>      {team_option}\n  -h, --help             {help_option}\n\nLLM options:\n      --llm-provider <PROVIDER>  LLM provider (overrides GREENTIC_LLM_PROVIDER)\n      --llm-model <MODEL>        LLM model id (overrides GREENTIC_LLM_MODEL)\n      --no-llm                   Force the deterministic keyword path\n      --existing <FILE>          Existing answers.json to update (requires an LLM)\n      --in-place                 Overwrite --existing instead of writing answers.updated.json\n",
         about = t("operala.cli.prompt.about", locale),
         usage = t("operala.cli.usage", locale),
         options = t("operala.cli.options", locale),
@@ -3951,5 +4113,380 @@ mod tests {
         );
 
         let _ = fs::remove_file(&pack_path);
+    }
+
+    fn valid_business_events_answers() -> OperalaAnswers {
+        let mut answers = sample_business_events_answers();
+        answers.outputs.handoff_path = Some(answers.outputs.work_dir.join("h.json"));
+        answers
+    }
+
+    fn be_answers_mut(answers: &mut OperalaAnswers) -> &mut BusinessEventsAnswers {
+        answers
+            .capability_answers
+            .business_events
+            .as_mut()
+            .expect("business events answers")
+    }
+
+    #[test]
+    fn validate_answers_accepts_sample_business_events() {
+        validate_answers(&valid_business_events_answers()).expect("sample is valid");
+    }
+
+    #[test]
+    fn validate_answers_rejects_unsafe_business_event_names() {
+        for bad in ["../x", "a.b", "a/b", "", "Upper"] {
+            let mut answers = valid_business_events_answers();
+            be_answers_mut(&mut answers).events[0].domain = bad.to_string();
+            assert!(validate_answers(&answers).is_err(), "domain `{bad}`");
+        }
+    }
+
+    #[test]
+    fn validate_answers_rejects_duplicate_events_and_triggers() {
+        let mut answers = valid_business_events_answers();
+        let be = be_answers_mut(&mut answers);
+        be.events.push(be.events[0].clone());
+        let err = validate_answers(&answers).unwrap_err();
+        assert!(err.contains("more than once"), "got: {err}");
+
+        let mut answers = valid_business_events_answers();
+        let be = be_answers_mut(&mut answers);
+        be.triggers.push(be.triggers[0].clone());
+        let err = validate_answers(&answers).unwrap_err();
+        assert!(err.contains("trigger"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_answers_requires_business_events_payload_and_events() {
+        let mut answers = valid_business_events_answers();
+        answers.capability_answers.business_events = None;
+        assert!(validate_answers(&answers).is_err());
+
+        let mut answers = valid_business_events_answers();
+        be_answers_mut(&mut answers).events.clear();
+        assert!(validate_answers(&answers).is_err());
+    }
+
+    #[test]
+    fn validate_answers_rejects_non_gtpack_output_path() {
+        let mut answers = valid_business_events_answers();
+        answers.outputs.gtpack_path = Some(PathBuf::from("target/operala/foo"));
+        let err = validate_answers(&answers).unwrap_err();
+        assert!(err.contains(".gtpack"), "got: {err}");
+    }
+
+    #[test]
+    fn business_event_schema_keys_do_not_collide() {
+        let a = EventDecl {
+            domain: "a-b".into(),
+            name: "c".into(),
+            schema_version: "1".into(),
+            payload_fields: BTreeMap::new(),
+        };
+        let b = EventDecl {
+            domain: "a".into(),
+            name: "b-c".into(),
+            ..a.clone()
+        };
+        assert_ne!(business_event_schema_key(&a), business_event_schema_key(&b));
+    }
+
+    #[test]
+    fn write_gtpack_refuses_to_delete_a_plain_directory() {
+        let dir = std::env::temp_dir().join(format!("operala-gtpack-dir-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let keep = dir.join("keep.txt");
+        fs::write(&keep, "precious").unwrap();
+        let answers = sample_business_events_answers();
+        let err = write_operala_gtpack(&dir, &sample_handoff(), &answers).unwrap_err();
+        assert!(err.contains("refusing"), "got: {err}");
+        assert!(keep.is_file(), "directory content must survive");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settlement_and_exception_records_keep_default_names_when_absent() {
+        let records = vec!["Tenant".to_string(), "RentObligation".to_string()];
+        assert_eq!(pick_preferred(&records, &["Payment", "Receipt"]), "Payment");
+        assert_eq!(
+            pick_preferred(&["Receipt".to_string()], &["Payment", "Receipt"]),
+            "Receipt"
+        );
+    }
+
+    #[test]
+    fn local_reference_with_digest_pin_resolves_to_the_file() {
+        let dir = std::env::temp_dir().join(format!("operala-pin-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s.yaml");
+        fs::write(&file, "x").unwrap();
+        let reference = format!("{}@sha256:abc", file.display());
+        let resolved = LocalCacheArtifactResolver::with_root(dir.clone())
+            .resolve_sync(&reference, None, None)
+            .expect("pinned local reference resolves");
+        assert!(matches!(resolved, ResolvedArtifact::LocalPath(path) if path == file));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_wizard_run_is_recorded_as_failed() {
+        let mut answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .expect("fixture answers parse");
+        let root = std::env::temp_dir().join(format!("operala-wizard-fail-{}", std::process::id()));
+        answers.outputs.work_dir = root.join("work");
+        answers.outputs.handoff_path = Some(root.join("work").join("h.json"));
+        answers.outputs.gtpack_path = Some(root.join("pack.gtpack"));
+        answers.sorla.source.uri = root.join("missing.yaml").display().to_string();
+        answers.sorla.source.digest = None;
+
+        assert!(run_wizard(&answers).is_err());
+        let state: WizardState = serde_json::from_slice(
+            &fs::read(root.join("work").join("operala.state.json")).expect("state exists"),
+        )
+        .expect("state parses");
+        assert_eq!(state.status, "failed");
+        assert!(state.error.is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn update_mode_refines_business_events_answers() {
+        let existing = sample_business_events_answers();
+        let mut value =
+            serde_json::to_value(existing.capability_answers.business_events.clone().unwrap())
+                .unwrap();
+        value["triggers"][0]["id"] = json!("daily_rent_v2");
+        let chat =
+            inference::tests_support::scripted_chat(vec![inference::tests_support::emit(value)]);
+        let outcome = inference::update_answers_unvalidated(
+            &chat,
+            &existing,
+            &sample_business_events_sorla(),
+            "rename the trigger",
+        )
+        .expect("business events update succeeds");
+        let triggers = outcome
+            .answers
+            .capability_answers
+            .business_events
+            .expect("still business events")
+            .triggers;
+        assert_eq!(triggers[0].id, "daily_rent_v2");
+    }
+
+    #[test]
+    fn missing_settlement_record_is_bound_to_default_and_reported_missing() {
+        let mut sorla = load_sorla_contract(&SourceRef {
+            kind: SourceKind::File,
+            uri: "extensions/reconciliation/examples/tenancy/sorla.yaml".to_string(),
+            digest: None,
+        })
+        .expect("fixture sorla loads");
+        sorla
+            .records
+            .retain(|record| record != "Payment" && record != "Receipt" && record != "Allocation");
+        let recon = infer_reconciliation_answers(&sorla).expect("inference still succeeds");
+        assert_eq!(recon.settlement_record, "Payment");
+        let answers: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .unwrap();
+        let mut answers = answers;
+        answers.capability_answers.reconciliation = Some(recon);
+        let readiness = RECONCILIATION_EXTENSION
+            .analyse_sorla(&sorla, &answers)
+            .expect("analysis runs");
+        assert!(
+            readiness
+                .missing
+                .iter()
+                .any(|item| item.contains("settlement_record")),
+            "missing: {:?}",
+            readiness.missing
+        );
+    }
+
+    #[test]
+    fn build_summary_distinguishes_patch_states() {
+        let readiness = ReadinessReport {
+            schema: READINESS_SCHEMA.to_string(),
+            capability: "reconciliation".into(),
+            status: ReadinessStatus::NeedsSorlaChanges,
+            found: BTreeMap::new(),
+            missing: vec!["action `x`".into()],
+            warnings: Vec::new(),
+            summary: "s".into(),
+        };
+        let handoff = sample_handoff();
+        assert!(build_summary(&readiness, &handoff, "proposed").contains("proposed, not applied"));
+        assert!(
+            build_summary(&readiness, &handoff, "manual_required")
+                .contains("manual SoRLa changes required")
+        );
+        assert!(build_summary(&readiness, &handoff, "not_needed").contains("not needed"));
+    }
+
+    #[test]
+    fn business_events_without_an_llm_explains_why() {
+        let args = PromptArgs {
+            prompt: "send a reminder every morning".into(),
+            sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+            tenant: Some("acme".into()),
+            team: None,
+            locale: None,
+            existing: None,
+            in_place: false,
+            llm_provider: None,
+            llm_model: None,
+            no_llm: true,
+            output: None,
+        };
+        let err = prompt_answers(&args).unwrap_err();
+        assert!(err.contains("needs an LLM"), "got: {err}");
+    }
+
+    #[test]
+    fn gtpack_replaces_an_exploded_pack_directory() {
+        let dir = std::env::temp_dir().join(format!("operala-exploded-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("manifest.cbor"), b"x").unwrap();
+        write_operala_gtpack(&dir, &sample_handoff(), &sample_business_events_answers())
+            .expect("exploded pack is replaced by an archive");
+        assert!(dir.is_file());
+        let _ = fs::remove_file(&dir);
+    }
+
+    fn assert_valid_against_answers_schema(document: &Value) {
+        let schema: Value =
+            serde_json::from_str(include_str!("../schemas/operala.answers.schema.json"))
+                .expect("schema parses");
+        let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+        let errors: Vec<String> = validator
+            .iter_errors(document)
+            .map(|err| format!("{}: {err}", err.instance_path()))
+            .collect();
+        assert!(errors.is_empty(), "schema errors: {errors:#?}");
+    }
+
+    #[test]
+    fn answers_schema_file_accepts_every_capability_the_code_emits() {
+        let reconciliation: Value = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .unwrap();
+        assert_valid_against_answers_schema(&reconciliation);
+
+        let bulk = prompt_answers(&PromptArgs {
+            sorla: "extensions/reconciliation/examples/tenancy/sorla.yaml".into(),
+            locale: None,
+            output: None,
+            tenant: Some("acme".into()),
+            team: None,
+            llm_provider: None,
+            llm_model: None,
+            no_llm: true,
+            existing: None,
+            in_place: false,
+            prompt: "bulk upload landlords and tenants".into(),
+        })
+        .expect("bulk ingest answers");
+        assert_valid_against_answers_schema(&serde_json::to_value(bulk).unwrap());
+
+        let events = serde_json::to_value(valid_business_events_answers()).unwrap();
+        assert_valid_against_answers_schema(&events);
+    }
+
+    #[test]
+    fn answers_schema_file_rejects_unknown_capability() {
+        let mut doc = serde_json::to_value(valid_business_events_answers()).unwrap();
+        doc["detected_capability"] = json!("telepathy");
+        let schema: Value =
+            serde_json::from_str(include_str!("../schemas/operala.answers.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(!validator.is_valid(&doc));
+    }
+
+    #[test]
+    fn validate_answers_rejects_parent_dir_and_non_json_handoff_paths() {
+        let mut answers = valid_business_events_answers();
+        answers.outputs.work_dir = PathBuf::from("target/../../escape");
+        let err = validate_answers(&answers).unwrap_err();
+        assert!(err.contains("`..`"), "got: {err}");
+
+        let mut answers = valid_business_events_answers();
+        answers.outputs.handoff_path = Some(PathBuf::from("src/lib.rs"));
+        let err = validate_answers(&answers).unwrap_err();
+        assert!(err.contains(".json"), "got: {err}");
+    }
+
+    #[test]
+    fn output_name_follows_the_declared_extension_not_a_stray_block() {
+        let mut answers = valid_business_events_answers();
+        let mut stray: OperalaAnswers = serde_json::from_str(include_str!(
+            "../extensions/reconciliation/examples/tenancy/answers.json"
+        ))
+        .unwrap();
+        answers.capability_answers.reconciliation = stray.capability_answers.reconciliation.take();
+        answers
+            .capability_answers
+            .reconciliation
+            .as_mut()
+            .expect("stray block")
+            .name = "stray".into();
+        assert_eq!(capability_output_name(&answers, &sample_handoff()), "rent");
+    }
+
+    #[test]
+    fn load_answers_verifies_a_digest_pin() {
+        let dir = std::env::temp_dir().join(format!("operala-answers-pin-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("answers.json");
+        let body = include_str!("../extensions/reconciliation/examples/tenancy/answers.json");
+        fs::write(&file, body).unwrap();
+        let good = format!("{}@sha256:{}", file.display(), sha256_hex(body.as_bytes()));
+        load_answers(&good).expect("matching pin loads");
+        let bad = format!("{}@sha256:{}", file.display(), "0".repeat(64));
+        let err = load_answers(&bad).unwrap_err();
+        assert!(err.contains("digest mismatch"), "got: {err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_targets_the_declared_extension() {
+        let mut existing = valid_business_events_answers();
+        existing.capability_answers.reconciliation = serde_json::from_str::<OperalaAnswers>(
+            include_str!("../extensions/reconciliation/examples/tenancy/answers.json"),
+        )
+        .unwrap()
+        .capability_answers
+        .reconciliation;
+        existing.extension = EXTENSION_BULK_INGEST.to_string();
+        let chat = inference::tests_support::scripted_chat(vec![]);
+        let err = inference::update_answers_unvalidated(
+            &chat,
+            &existing,
+            &sample_business_events_sorla(),
+            "x",
+        )
+        .unwrap_err();
+        assert!(err.contains("bulk_ingest"), "got: {err}");
+    }
+
+    #[test]
+    fn wizard_validates_before_writing_any_state() {
+        let root =
+            std::env::temp_dir().join(format!("operala-wizard-dotdot-{}", std::process::id()));
+        let mut answers = valid_business_events_answers();
+        answers.outputs.work_dir = root.join("work").join("..").join("outside");
+        answers.outputs.handoff_path = None;
+        assert!(run_wizard(&answers).is_err());
+        assert!(
+            !root.exists(),
+            "nothing may be created for rejected answers"
+        );
     }
 }

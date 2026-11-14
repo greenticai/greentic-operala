@@ -9,7 +9,6 @@
     "intent",
     "sorla",
     "extension",
-    "tenant",
     "outputs"
   ],
   "properties": {
@@ -22,17 +21,22 @@
     },
     "detected_capability": {
       "type": "string",
-      "enum": ["reconciliation"]
+      "enum": ["reconciliation", "bulk_ingest", "business_events"]
     },
     "extension": {
       "type": "string",
-      "pattern": "^greentic\\.operala\\.[a-z0-9-]+\\.v[0-9]+$"
+      "description": "Extension id: `greentic.operala.reconciliation.v1`, `greentic.operala.bulk_ingest.v1`, or the literal `business_events`.",
+      "anyOf": [
+        {"pattern": "^greentic\\.operala\\.[a-z0-9_-]+\\.v[0-9]+$"},
+        {"const": "business_events"}
+      ]
     },
     "locale": {
       "type": "string"
     },
     "tenant": {
-      "type": "string"
+      "type": "string",
+      "description": "Optional while authoring; build and handoff validation (`operala.validation.tenant_required`) reject a missing or blank tenant."
     },
     "team": {
       "type": "string"
@@ -95,6 +99,12 @@
       "properties": {
         "reconciliation": {
           "$ref": "#/$defs/reconciliationAnswers"
+        },
+        "bulk_ingest": {
+          "$ref": "#/$defs/bulkIngestAnswers"
+        },
+        "business_events": {
+          "$ref": "#/$defs/businessEventsAnswers"
         }
       }
     },
@@ -137,6 +147,90 @@
       "minimum": 0,
       "maximum": 100
     },
+    "bulkIngestAnswers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "input_modes", "record_collections", "validation"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "input_modes": {
+          "type": "array",
+          "items": {"enum": ["batch"]},
+          "minItems": 1
+        },
+        "record_collections": {
+          "$ref": "#/$defs/fieldMap"
+        },
+        "actions": {
+          "$ref": "#/$defs/fieldMap"
+        },
+        "expected_counts": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "validation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "atomic": {"type": "boolean"},
+            "dry_run": {"type": "boolean"},
+            "require_unique_ids": {"type": "boolean"},
+            "validate_references": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "businessEventsAnswers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["domain", "name", "schema_version"],
+            "properties": {
+              "domain": {"type": "string", "minLength": 1},
+              "name": {"type": "string", "minLength": 1},
+              "schema_version": {"type": "string", "minLength": 1},
+              "payload_fields": {"$ref": "#/$defs/fieldMap"}
+            }
+          }
+        },
+        "triggers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "schedule", "emits"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "schedule": {
+                "type": "object",
+                "description": "greentic_triggers::TriggerSchedule, tagged on `kind`. The business_events extension schema validates the per-kind fields.",
+                "required": ["kind"],
+                "properties": {
+                  "kind": {
+                    "enum": ["every_minute", "hourly", "daily", "weekly", "monthly", "yearly", "once_at", "cron"]
+                  }
+                }
+              },
+              "emits": {"type": "string", "minLength": 1},
+              "payload_template": {}
+            }
+          }
+        }
+      }
+    },
     "reconciliationAnswers": {
       "type": "object",
       "additionalProperties": false,
@@ -156,7 +250,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_\\-]*$"
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
         },
         "source_event": {"type": "string", "minLength": 1},
         "expected_record": {"type": "string", "minLength": 1},

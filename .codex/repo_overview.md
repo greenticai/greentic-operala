@@ -13,17 +13,28 @@ their full acceptance criteria are implemented.
 
 ## Current Code
 
-- `Cargo.toml`: single publishable Rust package, `greentic-operala`, with the
-  `greentic-operala` authoring binary.
+- `Cargo.toml`: root Rust package `greentic-operala` (authoring binary) plus a
+  Cargo workspace whose only other member is
+  `crates/greentic-operala-designer-extension`. Run cargo with `--workspace`
+  so both are covered.
+- `crates/greentic-operala-designer-extension/`: Greentic Designer extension
+  (WASM component, `describe.json`, WIT) exposing `generate_operala_answers`,
+  `update_operala_answers`, and validation tools over the OperaLa library.
 - `src/lib.rs`: reusable implementation for answers, local artifact
   resolution, SoRLa contract inspection, QA schema emission, reconciliation
   readiness, and operational handoff generation.
 - `src/main.rs`: `greentic-operala` CLI entrypoint.
+- `src/inference/`: LLM-backed `prompt` inference (SoRLa catalog, chat
+  session, answers diffing, validation gate). The deterministic keyword path
+  stays in `src/lib.rs`.
 - `docs/architecture/operala-operax.md`: architecture decision for SoRLa,
   OperaLa, OperaX, SORX, and `gtc` ownership.
 - `extensions/reconciliation/`: stable home for the built-in reconciliation
-  extension and future templates/schemas/examples.
-- `examples/tenancy/`: runnable tenancy reconciliation demo fixture.
+  extension (templates, schemas, examples).
+- `extensions/bulk-ingest/`: built-in bulk-ingest extension
+  (`greentic.operala.bulk_ingest.v1`) and its landlord-tenant example prompt.
+- `extensions/reconciliation/examples/tenancy/`: runnable tenancy
+  reconciliation demo fixture (SoRLa, answers, banking inputs, mock SORX).
 - `ci/local_check.sh`: canonical local quality gate.
 - `scripts/validate_codex_material.sh`: validates active `.codex` JSON schemas,
   examples, and legacy SoRLa-shape regressions.
@@ -31,8 +42,10 @@ their full acceptance criteria are implemented.
   planning fixture and, when `../greentic-sorla` is present, validates the
   example SoRLa YAML through the real SoRLa CLI.
 - `tools/i18n.sh`: i18n lifecycle hook matching the SoRLa repo shape.
-- `.github/workflows/`: CI, customer pilot demo smoke, nightly coverage,
-  dependency review, CodeQL, and Dependabot configuration.
+- `.github/workflows/`: `ci.yml`, `operala.yml` (authoring surface),
+  `operax.yml` (OperaLa/OperaX integration), `customer-pilot-demo.yml`,
+  `nightly-coverage.yml`, `dependency-review.yml`, `codeql.yml`,
+  `publish-extension.yml` (designer extension), and Dependabot configuration.
 
 ## PR Material
 
@@ -84,9 +97,10 @@ their full acceptance criteria are implemented.
   quality gates for fmt, clippy, tests, schemas, golden demo assertions,
   dry-run and mock-write smoke, i18n, handoff/build-lock validation, generated
   artifact safety, coverage, and failure artifact upload.
-- `schemas/`: runtime schemas for OperaLa answers.
-- `examples/tenancy/`: tenancy reconciliation pilot inputs, including
-  `answers.json`.
+- `schemas/`: runtime schemas for OperaLa answers (reconciliation,
+  bulk_ingest, and business_events capability answers).
+- `extensions/reconciliation/examples/tenancy/`: tenancy reconciliation pilot
+  inputs, including `answers.json`.
 - `.codex/audit-operala-generated-material.md`: audit record of changes made
   after comparing against `../greentic-sorla`.
 - `.codex/greentic-sorla-summary.md`: local summary of the sibling SoRLa repo.
@@ -110,7 +124,8 @@ Run:
 bash ci/local_check.sh
 ```
 
-Current checks include Rust fmt/clippy/test/build/doc, `.codex` schema and
+Current checks include Rust fmt/clippy/test/build/doc (all with
+`--workspace`), `.codex` schema and
 fixture validation, customer pilot fixture smoke, cross-repo SoRLa validation
 when `../greentic-sorla` is available, and optional `greentic-dev coverage`
 when installed.

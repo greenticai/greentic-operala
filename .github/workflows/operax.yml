@@ -7,6 +7,9 @@ on:
       - main
       - master
 
+permissions:
+  contents: read
+
 concurrency:
   group: operala-operax-integration-${{ github.ref }}
   cancel-in-progress: true
@@ -34,6 +37,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y jq ripgrep
       - name: Install Greentic binary tools
         id: tools
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cargo install cargo-binstall --locked
           # greentic-operax is distributed via GitHub release binaries and has
@@ -48,20 +53,21 @@ jobs:
         if: steps.tools.outputs.operax == 'true'
         working-directory: greentic-operala
         run: |
+          PROMPT="$(cat extensions/reconciliation/examples/tenancy/prompt.txt)"
           cargo run --bin greentic-operala -- prompt --locale en-GB --tenant demo-tenant --team property-ops \
-            --sorla examples/tenancy/sorla.yaml \
+            --sorla extensions/reconciliation/examples/tenancy/sorla.yaml \
             --output target/operala-demo/answers.json \
-            "$(cat examples/tenancy/prompt.txt)"
+            "$PROMPT"
           cargo run --bin greentic-operala -- wizard --answers target/operala-demo/answers.json --locale en-GB
       - name: Run installed OperaX against OperaLa artifact
         if: steps.tools.outputs.operax == 'true'
         working-directory: greentic-operala
         run: |
           greentic-operax run \
-            target/gtpacks/tenancy-rent-reconciliation.gtpack \
+            target/operala/tenancy_rent_reconciliation/tenancy-rent-reconciliation.gtpack \
             --tenant demo-tenant \
             --team property-ops \
             --sorx-url http://localhost:8088 \
-            --input examples/tenancy/banking/one-transaction.json \
+            --input extensions/reconciliation/examples/tenancy/banking/one-transaction.json \
             --dry-run \
             --json

@@ -56,6 +56,8 @@ greentic-llm = { version = "1.0.1", features = ["test-mock"] }
 zip = "8"
 # Decode manifest.cbor in pack-manifest assertion tests (matches greentic-pack's own pin).
 serde_cbor = "0.11"
+# Validate generated answers against schemas/operala.answers.schema.json.
+jsonschema = { version = "0.46", default-features = false }
 
 [lib]
 name = "greentic_operala"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from pathlib import Path
 class MockSorxHandler(BaseHTTPRequestHandler):
     state_path = None
     log_path = None
+    state_lock = threading.Lock()
 
     def do_GET(self):
         if self.path == "/healthz":
@@ -38,12 +40,26 @@ class MockSorxHandler(BaseHTTPRequestHandler):
             self.send_error(404, "unknown mock SORX endpoint")
 
     def do_POST(self):
-        length = int(self.headers.get("content-length", "0"))
-        payload = json.loads(self.rfile.read(length) or b"{}")
+        try:
+            length = int(self.headers.get("content-length", "0"))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, UnicodeDecodeError):
+            self.send_error(400, "request body must be valid JSON")
+            return
+        if not isinstance(payload, dict):
+            self.send_error(400, "request body must be a JSON object")
+            return
         action, values = self._action_and_values(payload)
         if action is None:
             self.send_error(404, "expected a SORX business-action or generated-route endpoint")
             return
+        if not isinstance(values, dict):
+            self.send_error(400, "business-action values must be a JSON object")
+            return
+        with self.state_lock:
+            self._apply_action(action, values)
+
+    def _apply_action(self, action, values):
         state = json.loads(self.state_path.read_text())
         calls = json.loads(self.log_path.read_text()) if self.log_path.exists() else []
         calls.append({"action": action, "payload": values})

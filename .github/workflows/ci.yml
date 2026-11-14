@@ -7,9 +7,12 @@ on:
       - main
       - master
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   local-check:
@@ -41,6 +44,8 @@ jobs:
       - name: Install ripgrep and jq
         run: sudo apt-get update && sudo apt-get install -y ripgrep jq
       - name: Install Greentic binary tools
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cargo install cargo-binstall --locked
           # greentic-operax is not yet published to crates.io; don't fail the
@@ -49,4 +54,6 @@ jobs:
           cargo binstall -y greentic-operax || echo "::warning::greentic-operax not yet published; skipping install"
       - name: Run local check
         working-directory: greentic-operala
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash ci/local_check.sh

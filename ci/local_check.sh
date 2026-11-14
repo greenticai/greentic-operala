@@ -24,8 +24,10 @@ missing_metadata() {
 }
 
 run_step "Environment and metadata pre-checks"
-echo "+ cargo metadata --no-deps --format-version 1 > /tmp/greentic-operala-cargo-metadata.json"
-cargo metadata --no-deps --format-version 1 >/tmp/greentic-operala-cargo-metadata.json
+metadata_file="$(mktemp -t greentic-operala-cargo-metadata.XXXXXX.json)"
+trap 'rm -f "$metadata_file"' EXIT
+echo "+ cargo metadata --no-deps --format-version 1 > ${metadata_file}"
+cargo metadata --no-deps --format-version 1 >"$metadata_file"
 
 if command -v jq >/dev/null 2>&1; then
   while IFS= read -r manifest_path; do
@@ -35,7 +37,7 @@ if command -v jq >/dev/null 2>&1; then
     missing_metadata "$manifest_path" "readme"
     missing_metadata "$manifest_path" "categories"
     missing_metadata "$manifest_path" "keywords"
-  done < <(jq -r '.packages[] | select(.publish == null or (.publish | length) > 0) | .manifest_path' /tmp/greentic-operala-cargo-metadata.json)
+  done < <(jq -r '.packages[] | select(.publish == null or (.publish | length) > 0) | .manifest_path' "$metadata_file")
 else
   echo "[metadata] jq not found; skipping publishable metadata field scan"
 fi
@@ -44,16 +46,16 @@ run_step "cargo fmt"
 run_cmd cargo fmt --all -- --check
 
 run_step "cargo clippy"
-run_cmd cargo clippy --all-targets --all-features -- -D warnings
+run_cmd cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 run_step "cargo test"
-run_cmd cargo test --all-features
+run_cmd cargo test --workspace --all-features
 
 run_step "cargo build"
-run_cmd cargo build --all-features
+run_cmd cargo build --workspace --all-features
 
 run_step "cargo doc"
-run_cmd cargo doc --no-deps --all-features
+run_cmd cargo doc --workspace --no-deps --all-features
 
 run_step "Codex planning material"
 run_cmd bash scripts/validate_codex_material.sh

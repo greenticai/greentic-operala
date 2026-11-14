@@ -91,7 +91,7 @@ impl prompting::Guest for Component {
         vec![prompting::PromptFragment {
             section: "operala.principles".to_string(),
             content_markdown: "When using OperaLa tools, select the capability that best matches \
-                the operator's intent (reconciliation or bulk_ingest), then generate answers \
+                the operator's intent (reconciliation, bulk_ingest or business_events), then generate answers \
                 anchored to SoRLa catalog identifiers. Produce a handoff pack only after the \
                 answers have been validated."
                 .to_string(),

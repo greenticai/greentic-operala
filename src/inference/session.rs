@@ -32,11 +32,10 @@ pub fn parse_outcome(response: &ChatResponse) -> OperalaResult<InferenceOutcome>
         return match call.name.as_str() {
             "emit_answers" => Ok(InferenceOutcome::Answers(call.arguments.clone())),
             "follow_up" => {
-                let question = call.arguments["question"]
-                    .as_str()
-                    .unwrap_or("Which SoRLa bindings should be used?")
-                    .to_string();
-                Ok(InferenceOutcome::FollowUp(question))
+                let question = call.arguments["question"].as_str().ok_or_else(|| {
+                    "LLM called follow_up without a string `question` argument".to_string()
+                })?;
+                Ok(InferenceOutcome::FollowUp(question.to_string()))
             }
             other => Err(format!(
                 "LLM called unknown tool '{other}'; expected emit_answers or follow_up"
@@ -60,12 +59,14 @@ pub fn parse_outcome(response: &ChatResponse) -> OperalaResult<InferenceOutcome>
 /// Parse the capability-classification response: `{"capability": "<id>"}`.
 /// Returns None for "unknown" (caller falls back to follow_up_required).
 pub fn parse_classification(response: &ChatResponse) -> OperalaResult<Option<String>> {
-    let json = content_as_json(&response.content).ok_or_else(|| {
-        format!(
-            "LLM classification was not JSON; content was: {}",
+    // A reply that is not the requested JSON object is a provider problem
+    // (garbage, truncation, refusal), distinct from the model answering "unknown".
+    let Some(json) = content_as_json(&response.content) else {
+        return Err(format!(
+            "LLM classification reply was not a JSON object; content was: {}",
             response.content.chars().take(200).collect::<String>()
-        )
-    })?;
+        ));
+    };
     match json.get("capability").and_then(Value::as_str) {
         Some("unknown") | None => Ok(None),
         Some(capability) => Ok(Some(capability.to_string())),
@@ -274,5 +275,17 @@ mod tests {
             parse_classification(&text_response(r#"{"capability": "reporting"}"#)).unwrap(),
             Some("reporting".to_string())
         );
+    }
+
+    #[test]
+    fn classification_of_non_json_reply_is_an_error_with_the_content() {
+        let err = parse_classification(&text_response("reconciliation")).unwrap_err();
+        assert!(err.contains("reconciliation"), "got: {err}");
+    }
+
+    #[test]
+    fn follow_up_without_question_is_a_parse_error() {
+        let err = parse_outcome(&tool_response("follow_up", serde_json::json!({}))).unwrap_err();
+        assert!(err.contains("question"), "got: {err}");
     }
 }

@@ -59,8 +59,9 @@ pub fn generate_answers_with_chat(
         .ok_or("missing prompt")?;
     let capability = match input.get("capability").and_then(Value::as_str) {
         Some(c) => c.to_string(),
-        None => op::inference::classify_capability(chat, prompt)?
-            .ok_or_else(|| "could not classify capability".to_string())?,
+        None => op::inference::classify_capability(chat, prompt)?.ok_or_else(|| {
+            "could not classify capability; pass `capability` explicitly".to_string()
+        })?,
     };
     let (ext_id, schema) = capability_ids(&capability)?;
     match op::inference::infer_capability_answers(chat, ext_id, &schema, &sorla, prompt, None) {
@@ -68,10 +69,16 @@ pub fn generate_answers_with_chat(
             let document = answers_document(&capability, ext_id, prompt, &sorla, answers)?;
             Ok(json!({ "answers": document }))
         }
-        Err(e) if e.starts_with("follow-up required:") => Ok(json!({
-            "follow_up": e.trim_start_matches("follow-up required:").trim()
-        })),
-        Err(e) => Err(e),
+        Err(e) => follow_up_or_error(e),
+    }
+}
+
+/// A clarifying question from the model is a normal outcome, not a failure:
+/// hand it to the host as `{"follow_up": ...}` instead of an error.
+fn follow_up_or_error(error: String) -> Result<Value, String> {
+    match error.strip_prefix("follow-up required:") {
+        Some(question) => Ok(json!({ "follow_up": question.trim() })),
+        None => Err(error),
     }
 }
 
@@ -96,8 +103,13 @@ fn answers_document(
     let name = capability_answers
         .get("name")
         .and_then(Value::as_str)
-        .filter(|n| !n.trim().is_empty())
         .unwrap_or(capability);
+    // The name becomes a directory and file name; never trust the model's.
+    if !op::is_safe_identifier(name) {
+        return Err(format!(
+            "generated answers name `{name}` must match ^[a-z0-9][a-z0-9_-]*$"
+        ));
+    }
     let work_dir = format!("target/operala/{name}");
     let document = json!({
         "schema": op::ANSWERS_SCHEMA,
@@ -140,7 +152,11 @@ pub fn update_answers_with_chat(
     let answers_value = input.get("answers").ok_or("missing answers")?;
     let existing: op::OperalaAnswers =
         serde_json::from_value(answers_value.clone()).map_err(|e| e.to_string())?;
-    let outcome = op::inference::update_answers_unvalidated(chat, &existing, &sorla, instruction)?;
+    let outcome =
+        match op::inference::update_answers_unvalidated(chat, &existing, &sorla, instruction) {
+            Ok(outcome) => outcome,
+            Err(e) => return follow_up_or_error(e),
+        };
     let diff: Vec<Value> = outcome
         .diff
         .iter()
@@ -318,13 +334,13 @@ mod tests {
     // ── Scripted no-tools ChatFn stub (local, avoids reaching into operala privates) ──
 
     struct ScriptedChat {
-        responses: std::collections::VecDeque<op::ChatResponse>,
+        responses: std::sync::Mutex<std::collections::VecDeque<op::ChatResponse>>,
     }
 
     impl ScriptedChat {
         fn new(responses: Vec<op::ChatResponse>) -> Self {
             Self {
-                responses: responses.into(),
+                responses: std::sync::Mutex::new(responses.into()),
             }
         }
     }
@@ -335,15 +351,12 @@ mod tests {
         }
 
         fn chat(&self, _request: op::ChatRequest) -> Result<op::ChatResponse, op::LlmError> {
-            // VecDeque is behind &self so we use unsafe interior mutability via
-            // a RefCell to pop from the front. Alternatively, use a Mutex.
-            // For simplicity in tests we just clone the first response each time.
-            // (Single-response scripted chat.)
             Ok(self
                 .responses
-                .front()
-                .expect("scripted chat: no more responses")
-                .clone())
+                .lock()
+                .expect("scripted chat lock")
+                .pop_front()
+                .expect("scripted chat: no more responses"))
         }
     }
 
@@ -466,7 +479,7 @@ mod tests {
         let yaml = fixture_sorla_yaml();
         let chat = ScriptedChat::new(vec![op::ChatResponse {
             content:
-                json!({ "emit_answers": { "name": "rent_events", "events": [], "triggers": [] } })
+                json!({ "emit_answers": { "name": "rent_events", "events": [{ "domain": "rent", "name": "due", "schema_version": "1" }], "triggers": [] } })
                     .to_string(),
             tool_calls: vec![],
             finish_reason: op::FinishReason::Stop,
@@ -545,12 +558,7 @@ mod tests {
                     "expected both answers and diff, got: {v}"
                 );
             }
-            Err(e) => {
-                assert!(
-                    e.starts_with("follow-up required:"),
-                    "unexpected error: {e}"
-                );
-            }
+            Err(e) => panic!("unexpected error: {e}"),
         }
     }
 
@@ -650,6 +658,113 @@ mod tests {
         assert_eq!(
             described_tools, listed_tools,
             "describe.json tools must match list_tools() exactly"
+        );
+    }
+
+    fn text_chat(content: String) -> ScriptedChat {
+        ScriptedChat::new(vec![op::ChatResponse {
+            content,
+            tool_calls: vec![],
+            finish_reason: op::FinishReason::Stop,
+        }])
+    }
+
+    #[test]
+    fn generate_returns_follow_up_when_model_asks() {
+        let chat = text_chat(json!({ "follow_up": "Which event?" }).to_string());
+        let input = json!({
+            "sorla_yaml": fixture_sorla_yaml(),
+            "prompt": "reconcile rent payments",
+            "capability": "reconciliation"
+        });
+        let result = generate_answers_with_chat(&input, &chat).unwrap();
+        assert_eq!(result["follow_up"], "Which event?");
+    }
+
+    #[test]
+    fn update_returns_follow_up_when_model_asks() {
+        let chat = text_chat(json!({ "follow_up": "Which field?" }).to_string());
+        let input = json!({
+            "sorla_yaml": fixture_sorla_yaml(),
+            "answers": fixture_answers_value(),
+            "instruction": "change it"
+        });
+        let result = update_answers_with_chat(&input, &chat).unwrap();
+        assert_eq!(result["follow_up"], "Which field?");
+    }
+
+    #[test]
+    fn generate_requires_prompt_and_sorla() {
+        let chat = text_chat(String::new());
+        let err = generate_answers_with_chat(&json!({ "prompt": "x" }), &chat).unwrap_err();
+        assert!(err.contains("sorla_yaml"), "got: {err}");
+        let err = generate_answers_with_chat(&json!({ "sorla_yaml": fixture_sorla_yaml() }), &chat)
+            .unwrap_err();
+        assert!(err.contains("prompt"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_capability_is_rejected() {
+        let err = capability_ids("nope").unwrap_err();
+        assert!(err.contains("nope"), "got: {err}");
+    }
+
+    #[test]
+    fn follow_up_or_error_splits_questions_from_failures() {
+        assert_eq!(
+            follow_up_or_error("follow-up required: Which one? ".to_string()).unwrap(),
+            json!({ "follow_up": "Which one?" })
+        );
+        assert_eq!(follow_up_or_error("boom".to_string()).unwrap_err(), "boom");
+    }
+
+    #[test]
+    fn unsafe_model_chosen_name_is_rejected() {
+        let sorla = op::parse_sorla_contract_from_yaml(&fixture_sorla_yaml()).unwrap();
+        for bad in ["../../etc/x", "a/b", "Upper", " "] {
+            let body = json!({ "name": bad, "events": [], "triggers": [] });
+            let err = answers_document(
+                "business_events",
+                op::EXTENSION_BUSINESS_EVENTS,
+                "x",
+                &sorla,
+                body,
+            )
+            .unwrap_err();
+            assert!(err.contains("must match"), "name `{bad}`: {err}");
+        }
+    }
+
+    #[test]
+    fn generate_then_update_business_events_round_trips() {
+        let yaml = fixture_sorla_yaml();
+        let body = json!({ "name": "rent_events", "events": [{ "domain": "rent", "name": "due", "schema_version": "1" }], "triggers": [] });
+        let chat = ScriptedChat::new(vec![
+            op::ChatResponse {
+                content: json!({ "emit_answers": body }).to_string(),
+                tool_calls: vec![],
+                finish_reason: op::FinishReason::Stop,
+            },
+            op::ChatResponse {
+                content: json!({ "emit_answers": { "name": "rent_events_v2", "events": [{ "domain": "rent", "name": "due", "schema_version": "1" }], "triggers": [] } })
+                    .to_string(),
+                tool_calls: vec![],
+                finish_reason: op::FinishReason::Stop,
+            },
+        ]);
+        let generated = generate_answers_with_chat(
+            &json!({ "sorla_yaml": yaml, "prompt": "rent events", "capability": "business_events" }),
+            &chat,
+        )
+        .unwrap();
+        let updated = update_answers_with_chat(
+            &json!({ "sorla_yaml": yaml, "answers": generated["answers"], "instruction": "rename" }),
+            &chat,
+        )
+        .unwrap();
+        assert_eq!(
+            updated["answers"]["capability_answers"]["business_events"]["name"],
+            "rent_events_v2"
         );
     }
 }

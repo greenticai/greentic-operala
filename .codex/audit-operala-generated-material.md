@@ -27,35 +27,39 @@ against the observed `../greentic-sorla` architecture.
 
 ## Files Updated
 
+Historical record. The per-PR notes now live under `.codex/done/`, the tenancy
+example lives under `extensions/reconciliation/examples/tenancy/`, and
+`schemas/operax.decision.schema.json` was removed and no longer exists.
+
 - `.codex/CODEX_MASTER_PROMPT.md`
 - `.codex/done/00-architecture-overview.md`
 - `.codex/done/01-operala-cli-minimal-surface.md`
-- `.codex/02-operala-answers-contract.md`
-- `.codex/03-operala-distributor-client-resolution.md`
-- `.codex/04-operala-qa-lib-state-machine.md`
-- `.codex/05-operala-i18n-locale.md`
-- `.codex/06-operala-extension-api.md`
-- `.codex/07-operala-prompt-authoring.md`
-- `.codex/08-reconciliation-extension-scaffold.md`
-- `.codex/09-reconciliation-readiness-analyser.md`
-- `.codex/10-reconciliation-sorla-patch-templates.md`
-- `.codex/11-reconciliation-answers-schema.md`
-- `.codex/12-reconciliation-gtpack-builder.md`
-- `.codex/20-customer-pilot-tenancy-demo.md`
-- `.codex/21-ci-customer-pilot-quality-gates.md`
+- `.codex/done/02-operala-answers-contract.md`
+- `.codex/done/03-operala-distributor-client-resolution.md`
+- `.codex/done/04-operala-qa-lib-state-machine.md`
+- `.codex/done/05-operala-i18n-locale.md`
+- `.codex/done/06-operala-extension-api.md`
+- `.codex/done/07-operala-prompt-authoring.md`
+- `.codex/done/08-reconciliation-extension-scaffold.md`
+- `.codex/done/09-reconciliation-readiness-analyser.md`
+- `.codex/done/10-reconciliation-sorla-patch-templates.md`
+- `.codex/done/11-reconciliation-answers-schema.md`
+- `.codex/done/12-reconciliation-gtpack-builder.md`
+- `.codex/done/20-customer-pilot-tenancy-demo.md`
+- `.codex/done/21-ci-customer-pilot-quality-gates.md`
 - `schemas/operala.answers.schema.json`
-- `schemas/operax.decision.schema.json`
-- `examples/tenancy/sorla.yaml`
-- `examples/tenancy/answers.json`
+- `schemas/operax.decision.schema.json` (historical; since removed)
+- `extensions/reconciliation/examples/tenancy/sorla.yaml`
+- `extensions/reconciliation/examples/tenancy/answers.json`
 
 ## Validation Performed
 
-- JSON syntax validation with `jq` for both schemas and the example
+- JSON syntax validation with `jq` for the schema and the example
   `answers.json`.
-- SoRLa validation of `examples/tenancy/sorla.yaml` using:
+- SoRLa validation of `extensions/reconciliation/examples/tenancy/sorla.yaml` using:
 
 ```bash
-cargo run -p greentic-sorla -- design validate ../greentic-operala/examples/tenancy/sorla.yaml
+cargo run -p greentic-sorla -- design validate ../greentic-operala/extensions/reconciliation/examples/tenancy/sorla.yaml
 ```
 
 Result: `Validation: OK`.

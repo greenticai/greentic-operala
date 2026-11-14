@@ -9,8 +9,16 @@ does not mutate SoRLa directly. It reads a SoRLa source, asks or infers the
 operational answers, checks whether the SoRLa contract has the pieces needed,
 and writes handoff files that a runner such as `greentic-operax` can execute.
 
-The first built-in capability is tenancy rent reconciliation from bank
-transactions.
+Built-in capabilities:
+
+- `reconciliation`: tenancy rent reconciliation from bank transactions.
+- `bulk_ingest`: batch upload of records into a SoRLa system of record
+  (`extensions/bulk-ingest/`).
+- `business_events`: scheduled triggers that emit declared business events
+  (requires an LLM to author events and triggers).
+
+The designer extension (`crates/greentic-operala-designer-extension`) exposes
+`generate_operala_answers` and `update_operala_answers` for all three.
 
 ## What It Can Do
 
@@ -145,8 +153,8 @@ Run the core checks:
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
 ```
 
 Run the full local check:
@@ -155,7 +163,7 @@ Run the full local check:
 bash ci/local_check.sh
 ```
 
-The full local check expects `greentic-operax` to be installed on `PATH`.
+The full local check skips the pilot smoke run when `greentic-operax` is not on `PATH`.
 
 ## Relationship To Other Greentic Tools
 

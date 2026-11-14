@@ -45,8 +45,15 @@ fn walk(path: &str, old: &Value, new: &Value, entries: &mut Vec<DiffEntry>) {
         }
         (Value::Number(a), Value::Number(b)) => {
             // Compare numerically to avoid spurious int-vs-float diffs
-            // (serde_json Value PartialEq is variant-exact: 2.0 != 2).
-            if a.as_f64() != b.as_f64() {
+            // (serde_json Value PartialEq is variant-exact: 2.0 != 2). Integer
+            // pairs compare exactly: f64 cannot tell apart values above 2^53.
+            let equal = match (a.as_i64(), b.as_i64(), a.as_u64(), b.as_u64()) {
+                (Some(x), Some(y), _, _) => x == y,
+                (_, _, Some(x), Some(y)) => x == y,
+                _ if a.is_f64() || b.is_f64() => a.as_f64() == b.as_f64(),
+                _ => false,
+            };
+            if !equal {
                 entries.push(DiffEntry {
                     path: path.to_string(),
                     old: Some(old.clone()),
@@ -150,6 +157,13 @@ mod tests {
         let old = serde_json::json!({"amount_tolerance": 2.0});
         let new = serde_json::json!({"amount_tolerance": 2});
         assert!(diff_values(&old, &new).is_empty());
+    }
+
+    #[test]
+    fn large_integers_that_differ_are_a_diff() {
+        let old = serde_json::json!({ "n": 9007199254740992_u64 });
+        let new = serde_json::json!({ "n": 9007199254740993_u64 });
+        assert_eq!(diff_values(&old, &new).len(), 1);
     }
 
     #[test]
