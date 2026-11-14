@@ -10,7 +10,8 @@
     "summary": "Author operational-behaviour handoff artifacts from a guided prompt session.",
     "description": "Author and manage OperaLa operational behaviours anchored to a SoRLa contract.",
     "author": { "name": "Greentic AI", "email": "team@greentic.ai" },
-    "license": "MIT"
+    "license": "MIT",
+    "icon": "assets/icon.svg"
   },
   "engine": { "greenticDesigner": ">=1.2.0", "extRuntime": "^1.2.0" },
   "capabilities": { "offered": [ { "id": "greentic:operala/composition", "version": "1.0.0" } ], "required": [] },
